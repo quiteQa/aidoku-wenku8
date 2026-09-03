@@ -70,7 +70,26 @@ impl Wenku8 {
             request = request.header("Cookie", &cookie);
         }
 
-        Ok(request.html()?)
+        let html = request.html()?;
+        let body_text = html
+            .select_first("body")
+            .and_then(|body| body.text())
+            .unwrap_or_default();
+
+        if html.select_first("form[name='frmlogin']").is_some()
+            || body_text.contains("本站正式关闭")
+        {
+            bail!("Wenku8 返回登录页或站点已关闭，请确认账号状态和站点可用性");
+        }
+
+        if body_text.contains("Just a moment")
+            || body_text.contains("Sorry, you have been blocked")
+            || body_text.contains("请完成安全验证")
+        {
+            bail!("Wenku8 返回了 Cloudflare 或安全验证页面，Aidoku 无法绕过站点访问控制");
+        }
+
+        Ok(html)
     }
 
     fn book_url(key: &str) -> String {
