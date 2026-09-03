@@ -1,0 +1,17 @@
+[
+  {
+    "type": "group",
+    "title": "账号",
+    "items": [
+      {
+        "type": "login",
+        "key": "wenku8_login",
+        "title": "登录 Wenku8",
+        "logoutTitle": "退出 Wenku8",
+        "method": "web",
+        "url": "https://www.wenku8.net/login.php",
+        "clearCookiesOnLogOut": true
+      }
+    ]
+  }
+]

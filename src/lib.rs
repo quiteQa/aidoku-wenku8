@@ -3,26 +3,74 @@
 use aidoku::{
     alloc::{format, string::ToString, vec, String, Vec},
     helpers::uri::encode_uri_component,
-    imports::{html::Document, net::Request},
+    imports::{
+        defaults::{defaults_get_map, defaults_set, DefaultValue},
+        html::Document,
+        net::Request,
+    },
     prelude::*,
-    Chapter, ContentRating, FilterValue, Manga, MangaPageResult, MangaStatus, Page, PageContent,
-    Result, Source, Viewer,
+    Chapter, ContentRating, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
+    PageContent, Result, Source, Viewer, WebLoginHandler,
 };
 
 const BASE_URL: &str = "https://www.wenku8.net";
 const USER_AGENT: &str =
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 \
      (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+const LOGIN_SETTING_KEY: &str = "wenku8_login";
+const AUTH_COOKIE_STORAGE_KEY: &str = "wenku8_auth_cookies";
+const LOGIN_COOKIE_NAME: &str = "jieqiUserInfo";
 
 struct Wenku8;
 
 impl Wenku8 {
+    fn cookie_header(&self) -> Option<String> {
+        let cookies = defaults_get_map(AUTH_COOKIE_STORAGE_KEY)?;
+        let mut header = String::new();
+
+        for (name, value) in cookies {
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() || value.is_empty() {
+                continue;
+            }
+            if !header.is_empty() {
+                header.push_str("; ");
+            }
+            header.push_str(name);
+            header.push('=');
+            header.push_str(value);
+        }
+
+        if header.is_empty() {
+            None
+        } else {
+            Some(header)
+        }
+    }
+
+    fn clear_auth_cookies(&self) {
+        defaults_set(
+            &format!("{AUTH_COOKIE_STORAGE_KEY}.keys"),
+            DefaultValue::Null,
+        );
+        defaults_set(
+            &format!("{AUTH_COOKIE_STORAGE_KEY}.values"),
+            DefaultValue::Null,
+        );
+    }
+
     fn request_html(&self, url: &str) -> Result<Document> {
-        Ok(Request::get(url)?
+        let mut request = Request::get(url)?
             .header("User-Agent", USER_AGENT)
             .header("Referer", BASE_URL)
-            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5")
-            .html()?)
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5");
+
+        if let Some(cookie) = self.cookie_header() {
+            request = request.header("Cookie", &cookie);
+        }
+
+        Ok(request.html()?)
     }
 
     fn book_url(key: &str) -> String {
@@ -362,4 +410,26 @@ impl Source for Wenku8 {
     }
 }
 
-register_source!(Wenku8);
+impl WebLoginHandler for Wenku8 {
+    fn handle_web_login(&self, key: String, cookies: HashMap<String, String>) -> Result<bool> {
+        if key != LOGIN_SETTING_KEY {
+            bail!("不支持的登录设置：{key}");
+        }
+
+        let is_logged_in = cookies
+            .get(LOGIN_COOKIE_NAME)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+
+        if is_logged_in {
+            defaults_set(AUTH_COOKIE_STORAGE_KEY, DefaultValue::HashMap(cookies));
+        } else {
+            // Aidoku 在用户退出后会清除 WebView Cookie 并再次调用此处理器。
+            self.clear_auth_cookies();
+        }
+
+        Ok(is_logged_in)
+    }
+}
+
+register_source!(Wenku8, WebLoginHandler);
