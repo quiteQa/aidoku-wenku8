@@ -1,15 +1,38 @@
 [
   {
     "type": "group",
-    "title": "账号",
+    "title": "网站选择",
+    "items": [
+      {
+        "type": "picker",
+        "key": "wenku8_site",
+        "title": "Wenku8 网站",
+        "values": ["wenku8.net", "wenku8.cc"],
+        "titles": ["wenku8.net", "wenku8.cc"],
+        "default": "wenku8.net"
+      }
+    ]
+  },
+  {
+    "type": "group",
+    "title": "账号登录",
     "items": [
       {
         "type": "login",
-        "key": "wenku8_login",
-        "title": "登录 Wenku8",
-        "logoutTitle": "退出 Wenku8",
+        "key": "wenku8_login_net",
+        "title": "登录 wenku8.net",
+        "logoutTitle": "退出 wenku8.net",
         "method": "web",
         "url": "https://www.wenku8.net/login.php",
+        "clearCookiesOnLogOut": true
+      },
+      {
+        "type": "login",
+        "key": "wenku8_login_cc",
+        "title": "登录 wenku8.cc",
+        "logoutTitle": "退出 wenku8.cc",
+        "method": "web",
+        "url": "https://www.wenku8.cc/login.php",
         "clearCookiesOnLogOut": true
       }
     ]

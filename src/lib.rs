@@ -4,7 +4,7 @@ use aidoku::{
     alloc::{format, string::ToString, vec, String, Vec},
     helpers::uri::encode_uri_component,
     imports::{
-        defaults::{defaults_get_map, defaults_set, DefaultValue},
+        defaults::{defaults_get, defaults_get_map, defaults_set, DefaultValue},
         html::Document,
         net::Request,
     },
@@ -13,19 +13,35 @@ use aidoku::{
     PageContent, Result, Source, Viewer, WebLoginHandler,
 };
 
-const BASE_URL: &str = "https://www.wenku8.net";
+const DEFAULT_SITE: &str = "wenku8.net";
+const SITE_SETTING_KEY: &str = "wenku8_site";
 const USER_AGENT: &str =
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 \
      (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
-const LOGIN_SETTING_KEY: &str = "wenku8_login";
-const AUTH_COOKIE_STORAGE_KEY: &str = "wenku8_auth_cookies";
+const LOGIN_NET_KEY: &str = "wenku8_login_net";
+const LOGIN_CC_KEY: &str = "wenku8_login_cc";
+const AUTH_COOKIE_STORAGE_PREFIX: &str = "wenku8_auth_cookies_";
 const LOGIN_COOKIE_NAME: &str = "jieqiUserInfo";
 
 struct Wenku8;
 
 impl Wenku8 {
+    fn base_url(&self) -> String {
+        format!("https://{}", self.selected_site())
+    }
+
+    fn auth_cookie_storage_key(&self) -> String {
+        format!("{AUTH_COOKIE_STORAGE_PREFIX}{}", self.selected_site())
+    }
+
+    fn selected_site(&self) -> String {
+        defaults_get::<String>(SITE_SETTING_KEY)
+            .filter(|value| value == "wenku8.net" || value == "wenku8.cc")
+            .unwrap_or_else(|| DEFAULT_SITE.to_string())
+    }
+
     fn cookie_header(&self) -> Option<String> {
-        let cookies = defaults_get_map(AUTH_COOKIE_STORAGE_KEY)?;
+        let cookies = defaults_get_map(&self.auth_cookie_storage_key())?;
         let mut header = String::new();
 
         for (name, value) in cookies {
@@ -49,21 +65,15 @@ impl Wenku8 {
         }
     }
 
-    fn clear_auth_cookies(&self) {
-        defaults_set(
-            &format!("{AUTH_COOKIE_STORAGE_KEY}.keys"),
-            DefaultValue::Null,
-        );
-        defaults_set(
-            &format!("{AUTH_COOKIE_STORAGE_KEY}.values"),
-            DefaultValue::Null,
-        );
+    fn clear_auth_cookies(&self, storage_key: &str) {
+        defaults_set(&format!("{storage_key}.keys"), DefaultValue::Null);
+        defaults_set(&format!("{storage_key}.values"), DefaultValue::Null);
     }
 
     fn request_html(&self, url: &str) -> Result<Document> {
         let mut request = Request::get(url)?
             .header("User-Agent", USER_AGENT)
-            .header("Referer", BASE_URL)
+            .header("Referer", &self.base_url())
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5");
 
         if let Some(cookie) = self.cookie_header() {
@@ -92,17 +102,17 @@ impl Wenku8 {
         Ok(html)
     }
 
-    fn book_url(key: &str) -> String {
+    fn book_url(&self, key: &str) -> String {
         if key.starts_with("http://") || key.starts_with("https://") {
             key.to_string()
         } else {
-            format!("{BASE_URL}/book/{key}.htm")
+            format!("{}/book/{key}.htm", self.base_url())
         }
     }
 
-    fn reader_url(key: &str) -> String {
+    fn reader_url(&self, key: &str) -> String {
         // Wenku8 的阅读目录入口长期使用 reader.php?aid=<id>
-        format!("{BASE_URL}/modules/article/reader.php?aid={key}")
+        format!("{}/modules/article/reader.php?aid={key}", self.base_url())
     }
 
     fn extract_book_key(url: &str) -> Option<String> {
@@ -255,7 +265,7 @@ impl Wenku8 {
                     url: Some(if url.starts_with("http") {
                         url
                     } else {
-                        format!("{BASE_URL}{url}")
+                        format!("{}{url}", self.base_url())
                     }),
                     ..Default::default()
                 });
@@ -308,14 +318,16 @@ impl Source for Wenku8 {
     ) -> Result<MangaPageResult> {
         let url = if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
             format!(
-                "{BASE_URL}/modules/article/search.php?searchtype=articlename&searchkey={}&page={}&charset=utf-8",
+                "{}/modules/article/search.php?searchtype=articlename&searchkey={}&page={}&charset=utf-8",
+                self.base_url(),
                 encode_uri_component(query.trim()),
                 page
             )
         } else {
             // 无搜索词时显示最近更新。
             format!(
-                "{BASE_URL}/modules/article/toplist.php?sort=lastupdate&page={}",
+                "{}/modules/article/toplist.php?sort=lastupdate&page={}",
+                self.base_url(),
                 page
             )
         };
@@ -339,7 +351,7 @@ impl Source for Wenku8 {
         needs_details: bool,
         needs_chapters: bool,
     ) -> Result<Manga> {
-        let book_url = Self::book_url(&manga.key);
+        let book_url = self.book_url(&manga.key);
 
         if needs_details {
             let html = self.request_html(&book_url)?;
@@ -377,7 +389,7 @@ impl Source for Wenku8 {
         }
 
         if needs_chapters {
-            let html = self.request_html(&Self::reader_url(&manga.key))?;
+            let html = self.request_html(&self.reader_url(&manga.key))?;
             let mut chapters: Vec<Chapter> = Vec::new();
 
             if let Some(links) = html.select("td.ccss a[href], .ccss a[href]") {
@@ -389,7 +401,7 @@ impl Source for Wenku8 {
                     let url = if href.starts_with("http://") || href.starts_with("https://") {
                         href
                     } else {
-                        format!("{BASE_URL}/{href}")
+                        format!("{}/{href}", self.base_url())
                     };
 
                     let title = link
@@ -431,9 +443,11 @@ impl Source for Wenku8 {
 
 impl WebLoginHandler for Wenku8 {
     fn handle_web_login(&self, key: String, cookies: HashMap<String, String>) -> Result<bool> {
-        if key != LOGIN_SETTING_KEY {
-            bail!("不支持的登录设置：{key}");
-        }
+        let storage_key = match key.as_str() {
+            LOGIN_NET_KEY => format!("{AUTH_COOKIE_STORAGE_PREFIX}wenku8.net"),
+            LOGIN_CC_KEY => format!("{AUTH_COOKIE_STORAGE_PREFIX}wenku8.cc"),
+            _ => bail!("不支持的登录设置：{key}"),
+        };
 
         let is_logged_in = cookies
             .get(LOGIN_COOKIE_NAME)
@@ -441,10 +455,10 @@ impl WebLoginHandler for Wenku8 {
             .unwrap_or(false);
 
         if is_logged_in {
-            defaults_set(AUTH_COOKIE_STORAGE_KEY, DefaultValue::HashMap(cookies));
+            defaults_set(&storage_key, DefaultValue::HashMap(cookies));
         } else {
             // Aidoku 在用户退出后会清除 WebView Cookie 并再次调用此处理器。
-            self.clear_auth_cookies();
+            self.clear_auth_cookies(&storage_key);
         }
 
         Ok(is_logged_in)
