@@ -6,7 +6,7 @@ use aidoku::{
     imports::{
         defaults::{defaults_get, defaults_get_map, defaults_set, DefaultValue},
         html::Document,
-        net::Request,
+        net::{Request, Response},
     },
     prelude::*,
     Chapter, ContentRating, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
@@ -93,26 +93,50 @@ impl Wenku8 {
             request = request.header("Cookie", &cookie);
         }
 
-        let html = request.html()?;
+        let response = request.send()?;
+        self.validate_response_status(&response)?;
+
+        let html = response.get_html()?;
         let body_text = html
             .select_first("body")
             .and_then(|body| body.text())
             .unwrap_or_default();
+        let page_text = body_text.to_ascii_lowercase();
 
+        if page_text.contains("本站正式关闭")
+            || page_text.contains("本站已经关闭")
+            || page_text.contains("site is closed")
+        {
+            bail!("Wenku8 站点已关闭：当前域名返回了站点关闭页面");
+        }
+        if page_text.contains("just a moment")
+            || page_text.contains("checking your browser")
+            || page_text.contains("sorry, you have been blocked")
+            || page_text.contains("请完成安全验证")
+            || page_text.contains("cloudflare")
+        {
+            bail!(
+                "Wenku8 触发了 Cloudflare 安全验证：请在浏览器中确认站点可访问，或更换网络后重试"
+            );
+        }
         if html.select_first("form[name='frmlogin']").is_some()
-            || body_text.contains("本站正式关闭")
+            || body_text.contains("用户名或邮箱")
         {
-            bail!("Wenku8 返回登录页或站点已关闭，请确认账号状态和站点可用性");
+            bail!("Wenku8 登录已失效：请在插件设置中重新登录当前站点");
         }
-
-        if body_text.contains("Just a moment")
-            || body_text.contains("Sorry, you have been blocked")
-            || body_text.contains("请完成安全验证")
-        {
-            bail!("Wenku8 返回了 Cloudflare 或安全验证页面，Aidoku 无法绕过站点访问控制");
-        }
-
         Ok(html)
+    }
+
+    fn validate_response_status(&self, response: &Response) -> Result<()> {
+        match response.status_code() {
+            403 => bail!("Wenku8 返回 HTTP 403：访问被 Cloudflare 或站点安全策略拒绝"),
+            401 => bail!("Wenku8 返回 HTTP 401：登录会话无效，请重新登录"),
+            429 => bail!("Wenku8 返回 HTTP 429：请求过于频繁，请稍后再试"),
+            status if status >= 500 => {
+                bail!("Wenku8 服务器暂时不可用（HTTP {status}），请稍后重试");
+            }
+            _ => Ok(()),
+        }
     }
 
     fn book_url(&self, key: &str) -> String {
