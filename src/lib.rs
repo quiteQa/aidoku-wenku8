@@ -21,7 +21,6 @@ const LOGIN_NET_KEY: &str = "wenku8_login_net";
 const LOGIN_CC_KEY: &str = "wenku8_login_cc";
 const AUTH_COOKIE_STORAGE_PREFIX: &str = "wenku8_auth_cookies_";
 const LOGIN_COOKIE_NAME: &str = "jieqiUserInfo";
-const VISIT_COOKIE_NAME: &str = "jieqiVisitInfo";
 
 struct Wenku8;
 
@@ -68,19 +67,6 @@ impl Wenku8 {
     fn clear_auth_cookies(&self, storage_key: &str) {
         defaults_set(&format!("{storage_key}.keys"), DefaultValue::Null);
         defaults_set(&format!("{storage_key}.values"), DefaultValue::Null);
-    }
-
-    fn validate_session(&self) -> Result<()> {
-        let url = format!("{}/userdetail.php", self.base_url());
-        let html = self.request_html(&url)?;
-        let body_text = html
-            .select_first("body")
-            .and_then(|body| body.text())
-            .unwrap_or_default();
-        if body_text.contains("用户登录") || body_text.contains("用户名或邮箱") {
-            bail!("Wenku8 未接受当前登录会话，请重新登录");
-        }
-        Ok(())
     }
 
     fn request_html(&self, url: &str) -> Result<Document> {
@@ -487,17 +473,12 @@ impl WebLoginHandler for Wenku8 {
             .get(LOGIN_COOKIE_NAME)
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false);
-        let has_visit_cookie = cookies
-            .get(VISIT_COOKIE_NAME)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
-        let is_logged_in = has_user_cookie && has_visit_cookie;
+        // Aidoku 的回调不保证每个站点 Cookie 都会被返回；
+        // jieqiVisitInfo 可能因域、Path 或 WebView Cookie 策略暂时缺失。
+        // 只要核心登录 Cookie 存在，就先保存完整 Cookie Map，避免登录状态被误判为失败。
+        let is_logged_in = has_user_cookie;
         if is_logged_in {
             defaults_set(&storage_key, DefaultValue::HashMap(cookies));
-            if let Err(error) = self.validate_session() {
-                self.clear_auth_cookies(&storage_key);
-                return Err(error);
-            }
         } else {
             // Aidoku 在用户退出后会清除 WebView Cookie 并再次调用此处理器。
             self.clear_auth_cookies(&storage_key);
