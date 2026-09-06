@@ -1,4 +1,124 @@
 {
+  "config": { "hidesFiltersWhileSearching": true },
+  "listings": [
+  { "id": "heat", "name": "热度排名" },
+  {
+    "id": "all",
+    "name": "全部轻小说"
+  },
+  {
+    "id": "completed",
+    "name": "完结全本"
+  },
+  {
+    "id": "allvisit",
+    "name": "热门轻小说／总排行榜"
+  },
+  {
+    "id": "anime",
+    "name": "动画化作品"
+  },
+  {
+    "id": "lastupdate",
+    "name": "今日更新"
+  },
+  {
+    "id": "postdate",
+    "name": "新书一览"
+  },
+  {
+    "id": "allvote",
+    "name": "总推荐榜"
+  },
+  {
+    "id": "monthvisit",
+    "name": "月排行榜"
+  },
+  {
+    "id": "monthvote",
+    "name": "月推荐榜"
+  },
+  {
+    "id": "weekvisit",
+    "name": "周排行榜"
+  },
+  {
+    "id": "weekvote",
+    "name": "周推荐榜"
+  },
+  {
+    "id": "dayvisit",
+    "name": "日排行榜"
+  },
+  {
+    "id": "dayvote",
+    "name": "日推荐榜"
+  },
+  {
+    "id": "goodnum",
+    "name": "总收藏榜"
+  },
+  {
+    "id": "size",
+    "name": "字数排行"
+  },
+  {
+    "id": "class1",
+    "name": "文库 · 电击文库"
+  },
+  {
+    "id": "class2",
+    "name": "文库 · 富士见文库"
+  },
+  {
+    "id": "class3",
+    "name": "文库 · 角川文库"
+  },
+  {
+    "id": "class4",
+    "name": "文库 · MF文库J"
+  },
+  {
+    "id": "class5",
+    "name": "文库 · Fami通文库"
+  },
+  {
+    "id": "class6",
+    "name": "文库 · GA文库"
+  },
+  {
+    "id": "class7",
+    "name": "文库 · HJ文库"
+  },
+  {
+    "id": "class8",
+    "name": "文库 · 一迅社"
+  },
+  {
+    "id": "class9",
+    "name": "文库 · 集英社"
+  },
+  {
+    "id": "class10",
+    "name": "文库 · 小学馆"
+  },
+  {
+    "id": "class11",
+    "name": "文库 · 讲谈社"
+  },
+  {
+    "id": "class12",
+    "name": "文库 · 少女文库"
+  },
+  {
+    "id": "class13",
+    "name": "文库 · 其他文库"
+  },
+  {
+    "id": "class14",
+    "name": "文库 · 游戏剧本"
+  }
+],
   "info": {
     "id": "zh.wenku8",
     "name": "轻小说文库 Wenku8",

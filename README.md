@@ -14,6 +14,8 @@ PageContent::text(...)
 
 - 使用 Wenku8 所需的 GBK 编码搜索轻小说
 - 无搜索词时读取最近更新
+- 原生列表入口：全部、完结、动画化、热度排名、访问/推荐/收藏/字数排行及 14 个文库
+- “网页分类”单选筛选：以上入口、五组题材标签、0–9 / A–Z 首字母，共 106 项
 - 搜索与最近更新列表使用 Wenku8 官方封面地址
 - 小说详情页
 - 封面（多选择器 fallback）
@@ -21,13 +23,25 @@ PageContent::text(...)
 - reader.php 章节目录
 - `#acontent` / `#content` 正文解析
 - Aidoku Text Reader
-- 普通浏览器 User-Agent / Referer 请求头
+- 使用 Aidoku 默认浏览器标识及站点 Referer
 - Aidoku 内嵌 WebView 的正常网页登录
 - 可选择 `wenku8.net` 或 `wenku8.cc`
 - 登录后的 Wenku8 `jieqiUserInfo` Cookie 会话复用
 - 两个站点分别保存 Cookie，切换站点后需要登录对应站点
 - 在 Aidoku 设置页注销并清除该源的 WebView Cookie
-- 数据请求统一使用 Wenku8 的 `www` 主机；登录入口使用裸域名，以兼容 Aidoku 对父域 Cookie 的过滤方式
+- 数据请求与登录入口统一使用 Wenku8 的 `www` 主机
+
+## 分类使用
+
+依据 [Aidoku 官方资源配置文档](https://github.com/Aidoku/aidoku-rs/blob/main/book/src/ch02-01-resource-files.md)
+使用 `source.json` 的列表声明、`ListingProvider` 和 `filters.json` 实现原生分类。
+分类名和参数于 2026-09-06 从已登录的 Wenku8 网页核对。
+
+打开书源后选择列表入口，或在默认列表的筛选器中选择“网页分类”。
+每次打开一个网页分类，不组合文库、题材和首字母。输入书名时隐藏分类筛选并执行站内搜索。
+题材分为日常系、幻想系、黑深残、人物属性和特殊属性；中文标签按 GBK 编码请求。
+热度排名合并网页各榜单的书籍并去重，不提供翻页；其他分类按网页下一页链接加载。
+评论、账户面板等非书籍分类页面不在列表入口中。
 
 ## 重要限制
 

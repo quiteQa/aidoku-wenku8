@@ -1,5 +1,7 @@
 #![no_std]
 
+mod categories;
+
 use aidoku::{
     alloc::{format, string::ToString, vec, String, Vec},
     imports::{
@@ -9,7 +11,7 @@ use aidoku::{
     },
     prelude::*,
     Chapter, ContentRating, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
-    ImageRequestProvider, PageContent, Result, Source, Viewer, WebLoginHandler,
+    ImageRequestProvider, Listing, ListingProvider, PageContent, Result, Source, Viewer, WebLoginHandler,
 };
 use encoding_rs::GBK;
 
@@ -24,6 +26,22 @@ const REQUEST_TIMEOUT_SECONDS: f64 = 20.0;
 struct Wenku8;
 
 impl Wenku8 {
+    fn category_url(&self, category: &str, page: i32) -> Result<String> {
+        let (_, path) = categories::CATEGORIES.iter()
+            .find(|(id, _)| *id == category)
+            .ok_or_else(|| error!("未知分类，请重置分类筛选"))?;
+        let path = if let Some(tag) = category.strip_prefix("tag:") {
+            format!("tags.php?t={}", Self::encode_search_query(tag))
+        } else {
+            path.to_string()
+        };
+        let separator = if path.contains('?') { '&' } else { '?' };
+        if path.starts_with('/') {
+            return Ok(format!("{}{path}", self.base_url()));
+        }
+        Ok(format!("{}/modules/article/{path}{separator}page={}", self.base_url(), page.max(1)))
+    }
+
     fn base_url(&self) -> String {
         // Wenku8 的页面与登录流程以 www 主机为准。直接请求裸域名可能
         // 触发额外重定向，且两个主机的 Cloudflare 策略可能不同。
@@ -486,7 +504,7 @@ impl Source for Wenku8 {
         &self,
         query: Option<String>,
         page: i32,
-        _filters: Vec<FilterValue>,
+        filters: Vec<FilterValue>,
     ) -> Result<MangaPageResult> {
         let page = page.max(1);
         let html = if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
@@ -504,12 +522,11 @@ impl Source for Wenku8 {
                 self.request_html(&url)?
             }
         } else {
-            // 无搜索词时显示最近更新。
-            let url = format!(
-                "{}/modules/article/toplist.php?sort=lastupdate&page={}",
-                self.base_url(),
-                page
-            );
+            let category = filters.iter().find_map(|filter| match filter {
+                FilterValue::Select { id, value } if id == "category" => Some(value.as_str()),
+                _ => None,
+            }).unwrap_or("lastupdate");
+            let url = self.category_url(category, page)?;
             self.request_html(&url)?
         };
 
@@ -699,4 +716,12 @@ impl WebLoginHandler for Wenku8 {
     }
 }
 
-register_source!(Wenku8, WebLoginHandler, ImageRequestProvider);
+impl ListingProvider for Wenku8 {
+    fn get_manga_list(&self, listing: Listing, page: i32) -> Result<MangaPageResult> {
+        self.get_search_manga_list(None, page, vec![FilterValue::Select {
+            id: "category".to_string(), value: listing.id,
+        }])
+    }
+}
+
+register_source!(Wenku8, WebLoginHandler, ImageRequestProvider, ListingProvider);
