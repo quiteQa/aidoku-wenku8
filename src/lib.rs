@@ -4,7 +4,7 @@ use aidoku::{
     alloc::{format, string::ToString, vec, String, Vec},
     imports::{
         defaults::{defaults_get, defaults_get_map, defaults_set, DefaultValue},
-        html::Document,
+        html::{Document, Html},
         net::{set_rate_limit, Request, Response, TimeUnit},
     },
     prelude::*,
@@ -148,7 +148,20 @@ impl Wenku8 {
         let response = request.send()?;
         self.validate_response_status(&response)?;
 
-        let html = response.get_html()?;
+        // Wenku8 返回 GBK 字节。不要依赖客户端将旧编码识别为 UTF-8，
+        // 否则可能得到空 DOM；与参考客户端一样，在解析前明确解码。
+        let data = response.get_data()?;
+        if data.is_empty() {
+            bail!("Wenku8 返回了空响应，请稍后重试");
+        }
+        let decoded = match core::str::from_utf8(&data) {
+            Ok(text) => text.to_string(),
+            Err(_) => GBK.decode(&data).0.into_owned(),
+        };
+        let html = Html::parse_with_url(decoded.as_bytes(), url)?;
+        if html.select_first("form[name='frmlogin'], form[action*='login.php'] input[type='password']").is_some() {
+            bail!("Wenku8 返回登录页：请在插件设置中重新登录。若登录浏览器从 .cc 跳转到了 .net，请选择 .net 并登录该站点");
+        }
         let body_text = html
             .select_first("body")
             .and_then(|body| body.text())
@@ -481,7 +494,11 @@ impl Source for Wenku8 {
                 bail!("Wenku8 返回站点错误页面：可能是搜索过快或需要登录，请打开当前站点确认后重试");
             }
             // 空列表不能被当成成功，否则 Aidoku 只显示白屏。
-            bail!("Wenku8 未解析到书籍：可能没有搜索结果、返回了验证页面或页面结构发生变化，请打开当前站点确认");
+            let title = Self::first_text(&html, &["title"])
+                .unwrap_or_else(|| "无标题".to_string())
+                .chars().take(80).collect::<String>();
+            let links = html.select("a[href]").map(|links| links.count()).unwrap_or(0);
+            bail!("Wenku8 未解析到书籍（页面：{title}，链接数：{links}）。请打开当前站点确认登录状态；若网页正常，请反馈此提示");
         }
 
         // 只有页面确实链接到下一页时才继续，避免最后一页重复加载。
