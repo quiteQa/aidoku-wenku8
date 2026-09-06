@@ -5,11 +5,11 @@ use aidoku::{
     imports::{
         defaults::{defaults_get, defaults_get_map, defaults_set, DefaultValue},
         html::Document,
-        net::{Request, Response},
+        net::{set_rate_limit, Request, Response, TimeUnit},
     },
     prelude::*,
     Chapter, ContentRating, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
-    PageContent, Result, Source, Viewer, WebLoginHandler,
+    ImageRequestProvider, PageContent, Result, Source, Viewer, WebLoginHandler,
 };
 use encoding_rs::GBK;
 
@@ -21,6 +21,7 @@ const LOGIN_NET_KEY: &str = "wenku8_login_net";
 const LOGIN_CC_KEY: &str = "wenku8_login_cc";
 const AUTH_COOKIE_STORAGE_PREFIX: &str = "wenku8_auth_cookies_";
 const LOGIN_COOKIE_NAME: &str = "jieqiUserInfo";
+const REQUEST_TIMEOUT_SECONDS: f64 = 20.0;
 
 struct Wenku8;
 
@@ -133,7 +134,8 @@ impl Wenku8 {
         let mut request = Request::get(url)?
             .header("User-Agent", USER_AGENT)
             .header("Referer", &self.base_url())
-            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5");
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5")
+            .timeout(REQUEST_TIMEOUT_SECONDS);
 
         // Cookie 必须只发送给它所属的 HTTPS 站点。章节 URL 会持久化，
         // 用户切换域名后可能仍打开旧域名章节，不能把新站点会话带过去。
@@ -196,7 +198,14 @@ impl Wenku8 {
 
         match status {
             401 => bail!("Wenku8 返回 HTTP 401：登录会话无效，请重新登录"),
-            429 => bail!("Wenku8 返回 HTTP 429：请求过于频繁，请稍后再试"),
+            429 => {
+                if let Some(retry_after) = response.get_header("Retry-After") {
+                    bail!(
+                        "Wenku8 返回 HTTP 429：请求过于频繁，请在 {retry_after} 秒后重试"
+                    );
+                }
+                bail!("Wenku8 返回 HTTP 429：请求过于频繁，请稍后再试");
+            }
             status if status >= 500 => {
                 bail!("Wenku8 服务器暂时不可用（HTTP {status}），请稍后重试");
             }
@@ -428,6 +437,9 @@ impl Wenku8 {
 
 impl Source for Wenku8 {
     fn new() -> Self {
+        // 由 Aidoku 在网络层统一排队，比在每个入口手动 sleep 更可靠；
+        // 既抑制首页、搜索和详情同时刷新产生的突发请求，也不会阻塞解析逻辑。
+        set_rate_limit(4, 1, TimeUnit::Seconds);
         Self
     }
 
@@ -501,14 +513,20 @@ impl Source for Wenku8 {
                 }
             }
 
-            manga.cover = Self::first_attr(
+            let parsed_cover = Self::first_attr(
                 &html,
                 &["img[vspace]", "#content img", "table img"],
                 "abs:src",
             )
             .or_else(|| {
                 Self::first_attr(&html, &["img[vspace]", "#content img", "table img"], "src")
-            });
+            })
+            .and_then(|url| self.resolve_url(&url, &book_url));
+
+            // 详情页偶尔会省略封面或返回相对路径，不能覆盖列表页已经可用的封面。
+            manga.cover = parsed_cover
+                .or(manga.cover)
+                .or_else(|| Some(Self::cover_url(&manga.key)));
 
             manga.authors = Self::parse_author(&html).map(|a| vec![a]);
             manga.description = Self::parse_description(&html);
@@ -570,6 +588,22 @@ impl Source for Wenku8 {
     }
 }
 
+impl ImageRequestProvider for Wenku8 {
+    fn get_image_request(
+        &self,
+        url: String,
+        _context: Option<aidoku::PageContext>,
+    ) -> Result<Request> {
+        // img.wenku8.com 会根据来源和客户端策略拒绝部分裸请求。
+        // 让首页、搜索结果和详情页封面使用与 HTML 请求一致的浏览器标识。
+        Ok(Request::get(&url)?
+            .header("User-Agent", USER_AGENT)
+            .header("Referer", &self.base_url())
+            .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+            .timeout(REQUEST_TIMEOUT_SECONDS))
+    }
+}
+
 impl WebLoginHandler for Wenku8 {
     fn handle_web_login(&self, key: String, cookies: HashMap<String, String>) -> Result<bool> {
         let storage_key = match key.as_str() {
@@ -597,4 +631,4 @@ impl WebLoginHandler for Wenku8 {
     }
 }
 
-register_source!(Wenku8, WebLoginHandler);
+register_source!(Wenku8, WebLoginHandler, ImageRequestProvider);
