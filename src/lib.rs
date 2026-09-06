@@ -133,7 +133,11 @@ impl Wenku8 {
     }
 
     fn request_html(&self, url: &str) -> Result<Document> {
-        let mut request = Request::get(url)?
+        self.send_html(Request::get(url)?, url)
+    }
+
+    fn send_html(&self, request: Request, url: &str) -> Result<Document> {
+        let mut request = request
             .header("Referer", &self.base_url())
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5")
             .timeout(REQUEST_TIMEOUT_SECONDS);
@@ -426,6 +430,23 @@ impl Wenku8 {
         entries
     }
 
+    fn parse_single_search_result(&self, html: &Document) -> Option<Manga> {
+        // 唯一匹配会直接跳到详情页；不要把详情页推荐栏误当搜索结果。
+        let link = html.select_first("#content a[href*='addbookcase.php?bid=']")?;
+        let href = link.attr("href")?;
+        let key = href.split("bid=").nth(1)?.chars()
+            .take_while(|c| c.is_ascii_digit()).collect::<String>();
+        if key.is_empty() { return None; }
+        let title = Self::first_text(html, &["#content table b", "#content h1"])?;
+        Some(Manga {
+            cover: Some(Self::cover_url(&key)),
+            url: Some(self.book_url(&key)),
+            key,
+            title,
+            ..Default::default()
+        })
+    }
+
     fn chapter_text(&self, chapter: &Chapter) -> Result<String> {
         let url = chapter.url.clone().unwrap_or_else(|| chapter.key.clone());
 
@@ -468,23 +489,33 @@ impl Source for Wenku8 {
         _filters: Vec<FilterValue>,
     ) -> Result<MangaPageResult> {
         let page = page.max(1);
-        let url = if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
-            format!(
-                "{}/modules/article/search.php?searchtype=articlename&searchkey={}&page={}&charset=gbk",
-                self.base_url(),
-                Self::encode_search_query(query.trim()),
-                page
-            )
+        let html = if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
+            let encoded = Self::encode_search_query(query.trim());
+            if page == 1 {
+                // 与登录后实际网页表单一致：GBK 表单 POST 到 so.php。
+                let url = format!("{}/so.php", self.base_url());
+                let body = format!("searchtype=articlename&searchkey={encoded}&charset=&Submit=%C7%E1%D0%A1%CB%B5%CB%D1%CB%F7");
+                self.send_html(Request::post(&url)?
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(body.as_bytes()), &url)?
+            } else {
+                // 翻页沿用搜索结果页提供的 GET 参数，不添加额外 charset 参数。
+                let url = format!("{}/modules/article/search.php?searchtype=articlename&searchkey={encoded}&page={page}", self.base_url());
+                self.request_html(&url)?
+            }
         } else {
             // 无搜索词时显示最近更新。
-            format!(
+            let url = format!(
                 "{}/modules/article/toplist.php?sort=lastupdate&page={}",
                 self.base_url(),
                 page
-            )
+            );
+            self.request_html(&url)?
         };
 
-        let html = self.request_html(&url)?;
+        if let Some(manga) = self.parse_single_search_result(&html) {
+            return Ok(MangaPageResult { entries: vec![manga], has_next_page: false });
+        }
         let entries = self.parse_search_results(&html);
 
         if entries.is_empty() {
