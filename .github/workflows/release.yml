@@ -1,0 +1,90 @@
+name: Build and release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Package Aidoku source
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-aidoku-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install Aidoku CLI
+        run: |
+          if ! command -v aidoku >/dev/null 2>&1; then
+            cargo install --git https://github.com/Aidoku/aidoku-rs \
+              --rev e1320b0a2e11afb59e4dee374883a2212d325699 \
+              --locked aidoku-cli
+          fi
+
+      - name: Set build version
+        id: version
+        shell: bash
+        run: |
+          source_version=$((4 + GITHUB_RUN_NUMBER))
+          release_tag="v0.1.0-build.${GITHUB_RUN_NUMBER}"
+          jq --argjson version "$source_version" \
+            '.info.version = $version' res/source.json > res/source.json.tmp
+          mv res/source.json.tmp res/source.json
+          echo "source_version=$source_version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Package and verify
+        run: |
+          aidoku package .
+          aidoku verify package.aix
+          sha256sum package.aix > SHA256SUMS
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wenku8-${{ steps.version.outputs.release_tag }}
+          path: |
+            package.aix
+            SHA256SUMS
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          SOURCE_VERSION: ${{ steps.version.outputs.source_version }}
+        shell: bash
+        run: |
+          notes="Automated build of ${GITHUB_SHA}. Aidoku source version: ${SOURCE_VERSION}."
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" package.aix SHA256SUMS --clobber
+          else
+            gh release create "$RELEASE_TAG" package.aix SHA256SUMS \
+              --target "$GITHUB_SHA" \
+              --title "Wenku8 build ${SOURCE_VERSION}" \
+              --notes "$notes"
+          fi
