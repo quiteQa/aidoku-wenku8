@@ -23,7 +23,7 @@
         "title": "登录 wenku8.net",
         "logoutTitle": "退出 wenku8.net",
         "method": "web",
-        "url": "https://wenku8.net/login.php",
+        "url": "https://www.wenku8.net/login.php",
         "clearCookiesOnLogOut": true
       },
       {
@@ -32,7 +32,7 @@
         "title": "登录 wenku8.cc",
         "logoutTitle": "退出 wenku8.cc",
         "method": "web",
-        "url": "https://wenku8.cc/login.php",
+        "url": "https://www.wenku8.cc/login.php",
         "clearCookiesOnLogOut": true
       }
     ]

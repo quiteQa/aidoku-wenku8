@@ -15,8 +15,6 @@ use encoding_rs::GBK;
 
 const DEFAULT_SITE: &str = "wenku8.net";
 const SITE_SETTING_KEY: &str = "wenku8_site";
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-     (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0";
 const LOGIN_NET_KEY: &str = "wenku8_login_net";
 const LOGIN_CC_KEY: &str = "wenku8_login_cc";
 const AUTH_COOKIE_STORAGE_PREFIX: &str = "wenku8_auth_cookies_";
@@ -49,6 +47,10 @@ impl Wenku8 {
         for (name, value) in cookies {
             let name = name.trim();
             let value = value.trim();
+            // 验证 Cookie 由 Aidoku 的浏览器和网络会话管理，不能重放旧快照。
+            if !name.starts_with("jieqi") {
+                continue;
+            }
             if name.is_empty() || value.is_empty() {
                 continue;
             }
@@ -132,7 +134,6 @@ impl Wenku8 {
 
     fn request_html(&self, url: &str) -> Result<Document> {
         let mut request = Request::get(url)?
-            .header("User-Agent", USER_AGENT)
             .header("Referer", &self.base_url())
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5")
             .timeout(REQUEST_TIMEOUT_SECONDS);
@@ -632,10 +633,8 @@ impl ImageRequestProvider for Wenku8 {
         url: String,
         _context: Option<aidoku::PageContext>,
     ) -> Result<Request> {
-        // img.wenku8.com 会根据来源和客户端策略拒绝部分裸请求。
-        // 让首页、搜索结果和详情页封面使用与 HTML 请求一致的浏览器标识。
+        // 不覆盖 User-Agent，让 Aidoku 使用与其 WebView 一致的默认标识。
         Ok(Request::get(&url)?
-            .header("User-Agent", USER_AGENT)
             .header("Referer", &self.base_url())
             .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
             .timeout(REQUEST_TIMEOUT_SECONDS))
