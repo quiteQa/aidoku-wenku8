@@ -2,7 +2,6 @@
 
 use aidoku::{
     alloc::{format, string::ToString, vec, String, Vec},
-    helpers::uri::encode_uri_component,
     imports::{
         defaults::{defaults_get, defaults_get_map, defaults_set, DefaultValue},
         html::Document,
@@ -12,6 +11,7 @@ use aidoku::{
     Chapter, ContentRating, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
     PageContent, Result, Source, Viewer, WebLoginHandler,
 };
+use encoding_rs::GBK;
 
 const DEFAULT_SITE: &str = "wenku8.net";
 const SITE_SETTING_KEY: &str = "wenku8_site";
@@ -218,6 +218,29 @@ impl Wenku8 {
         format!("{}/modules/article/reader.php?aid={key}", self.base_url())
     }
 
+    fn cover_url(key: &str) -> String {
+        let directory = if key.len() <= 3 {
+            "0"
+        } else {
+            key.get(0..1).unwrap_or("0")
+        };
+        format!("https://img.wenku8.com/image/{directory}/{key}/{key}s.jpg")
+    }
+
+    fn encode_search_query(query: &str) -> String {
+        // Wenku8 的简体搜索表单使用 GBK，而不是 UTF-8。
+        // 按字节全部百分号编码，与站点表单及 hikari_novel_flutter 保持一致。
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        let (encoded, _, _) = GBK.encode(query);
+        let mut result = String::with_capacity(encoded.len() * 3);
+        for byte in encoded.iter().copied() {
+            result.push('%');
+            result.push(HEX[(byte >> 4) as usize] as char);
+            result.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        result
+    }
+
     fn extract_book_key(url: &str) -> Option<String> {
         // 兼容：
         // /book/1234.htm
@@ -362,9 +385,11 @@ impl Wenku8 {
                 }
 
                 seen.push(key.clone());
+                let cover = Some(Self::cover_url(&key));
                 entries.push(Manga {
                     key,
                     title,
+                    cover,
                     url: self.resolve_url(&url, &self.base_url()),
                     ..Default::default()
                 });
@@ -414,9 +439,9 @@ impl Source for Wenku8 {
     ) -> Result<MangaPageResult> {
         let url = if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
             format!(
-                "{}/modules/article/search.php?searchtype=articlename&searchkey={}&page={}&charset=utf-8",
+                "{}/modules/article/search.php?searchtype=articlename&searchkey={}&page={}&charset=gbk",
                 self.base_url(),
-                encode_uri_component(query.trim()),
+                Self::encode_search_query(query.trim()),
                 page
             )
         } else {
