@@ -26,10 +26,13 @@ PageContent::text(...)
 - 登录后的 Wenku8 `jieqiUserInfo` Cookie 会话复用
 - 两个站点分别保存 Cookie，切换站点后需要登录对应站点
 - 在 Aidoku 设置页注销并清除该源的 WebView Cookie
+- 数据请求统一使用 Wenku8 的 `www` 主机；登录入口使用裸域名，以兼容 Aidoku 对父域 Cookie 的过滤方式
 
 ## 重要限制
 
 Wenku8 当前会对部分服务器/IP 返回 403，并且部分页面可能要求登录。
+
+参考 `hikari_novel_flutter` 的处理方式，本源会区分 Cloudflare 人机验证与普通 403，并提示关闭代理或切换网络。书源无法在后台绕过 Cloudflare 验证；如果浏览器可以访问而 Aidoku 请求仍被拒绝，这是 Cloudflare 对原生网络客户端与浏览器采用不同识别策略所致。
 
 本项目**不会绕过登录、验证码或反爬机制**。当 Wenku8 要求登录时，请在 Aidoku 中打开此源的设置，选择“登录 Wenku8”，并在官方页面内自行完成登录。源只使用该网页登录产生的 Cookie 来请求受限页面，**不会读取、保存或提交你的账号密码**。
 

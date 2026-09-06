@@ -26,7 +26,9 @@ struct Wenku8;
 
 impl Wenku8 {
     fn base_url(&self) -> String {
-        format!("https://{}", self.selected_site())
+        // Wenku8 的页面与登录流程以 www 主机为准。直接请求裸域名可能
+        // 触发额外重定向，且两个主机的 Cloudflare 策略可能不同。
+        format!("https://www.{}", self.selected_site())
     }
 
     fn auth_cookie_storage_key(&self) -> String {
@@ -176,8 +178,23 @@ impl Wenku8 {
     }
 
     fn validate_response_status(&self, response: &Response) -> Result<()> {
-        match response.status_code() {
-            403 => bail!("Wenku8 返回 HTTP 403：访问被 Cloudflare 或站点安全策略拒绝"),
+        let status = response.status_code();
+        if status == 403 {
+            let is_challenge = response
+                .get_header("cf-mitigated")
+                .map(|value| value.to_ascii_lowercase().contains("challenge"))
+                .unwrap_or(false);
+            if is_challenge {
+                bail!(
+                    "Wenku8 触发了 Cloudflare 人机验证：请先用浏览器访问当前站点，或切换网络后重试"
+                );
+            }
+            bail!(
+                "Wenku8 返回 HTTP 403：当前 IP 或客户端被拒绝，请关闭代理或切换 Wi-Fi/蜂窝网络后重试"
+            );
+        }
+
+        match status {
             401 => bail!("Wenku8 返回 HTTP 401：登录会话无效，请重新登录"),
             429 => bail!("Wenku8 返回 HTTP 429：请求过于频繁，请稍后再试"),
             status if status >= 500 => {
