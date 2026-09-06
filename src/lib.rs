@@ -199,7 +199,8 @@ impl Wenku8 {
         match status {
             401 => bail!("Wenku8 返回 HTTP 401：登录会话无效，请重新登录"),
             429 => {
-                if let Some(retry_after) = response.get_header("Retry-After") {
+                if let Some(retry_after) = response.get_header("Retry-After")
+                    .and_then(|value| value.trim().parse::<u64>().ok()) {
                     bail!(
                         "Wenku8 返回 HTTP 429：请求过于频繁，请在 {retry_after} 秒后重试"
                     );
@@ -371,9 +372,11 @@ impl Wenku8 {
         let mut entries: Vec<Manga> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
 
-        if let Some(links) = html.select("a[href*='/book/']") {
+        if let Some(links) = html.select("a[href*='/book/'], a[href*='articleinfo.php?id=']") {
             for link in links {
-                let Some(url) = link.attr("abs:href").or_else(|| link.attr("href")) else {
+                let Some(url) = link.attr("abs:href")
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| link.attr("href")) else {
                     continue;
                 };
                 let Some(key) = Self::extract_book_key(&url) else {
@@ -385,6 +388,7 @@ impl Wenku8 {
 
                 let title = link
                     .attr("title")
+                    .filter(|value| !value.trim().is_empty())
                     .or_else(|| link.text())
                     .map(|s| s.trim().to_string())
                     .unwrap_or_default();
@@ -449,6 +453,7 @@ impl Source for Wenku8 {
         page: i32,
         _filters: Vec<FilterValue>,
     ) -> Result<MangaPageResult> {
+        let page = page.max(1);
         let url = if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
             format!(
                 "{}/modules/article/search.php?searchtype=articlename&searchkey={}&page={}&charset=gbk",
@@ -468,6 +473,17 @@ impl Source for Wenku8 {
         let html = self.request_html(&url)?;
         let entries = self.parse_search_results(&html);
 
+        if entries.is_empty() {
+            let site_error = Self::first_text(&html, &[".blocktitle"])
+                .map(|title| title.contains("出现错误") || title.contains("出現錯誤"))
+                .unwrap_or(false);
+            if site_error {
+                bail!("Wenku8 返回站点错误页面：可能是搜索过快或需要登录，请打开当前站点确认后重试");
+            }
+            // 空列表不能被当成成功，否则 Aidoku 只显示白屏。
+            bail!("Wenku8 未解析到书籍：可能没有搜索结果、返回了验证页面或页面结构发生变化，请打开当前站点确认");
+        }
+
         // 只有页面确实链接到下一页时才继续，避免最后一页重复加载。
         let next_page_marker = format!("page={}", page.saturating_add(1));
         let has_next_page = html
@@ -475,7 +491,10 @@ impl Source for Wenku8 {
             .map(|mut links| {
                 links.any(|link| {
                     link.attr("href")
-                        .map(|href| href.contains(&next_page_marker))
+                        .map(|href| href.split('?').nth(1)
+                            .map(|query| query.split('#').next().unwrap_or(query)
+                                .split('&').any(|part| part == next_page_marker))
+                            .unwrap_or(false))
                         .unwrap_or(false)
                 })
             })
@@ -543,7 +562,9 @@ impl Source for Wenku8 {
 
             if let Some(links) = html.select("td.ccss a[href], .ccss a[href]") {
                 for (index, link) in links.enumerate() {
-                    let Some(href) = link.attr("abs:href").or_else(|| link.attr("href")) else {
+                    let Some(href) = link.attr("abs:href")
+                        .filter(|value| !value.trim().is_empty())
+                        .or_else(|| link.attr("href")) else {
                         continue;
                     };
 
