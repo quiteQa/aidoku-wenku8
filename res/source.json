@@ -4,6 +4,7 @@
     "name": "轻小说文库 Wenku8",
     "version": 4,
     "url": "https://www.wenku8.net",
+    "minAppVersion": "0.8.3",
     "contentRating": 0,
     "languages": [
       "zh-Hans"
