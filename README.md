@@ -58,6 +58,18 @@ aidoku package .
 
 当前 `aidoku build` 用于构建多个已打包源组成的来源列表，并不用于打包单个源项目。
 
+## 自动发布
+
+推送到 `main` 分支后，GitHub Actions 会自动：
+
+1. 为安装包生成递增的 Aidoku 书源版本号；
+2. 安装固定版本的 Aidoku CLI；
+3. 打包并验证 `package.aix`；
+4. 生成 SHA-256 校验文件；
+5. 创建新的 GitHub Release 并上传上述文件。
+
+也可以在仓库的 Actions 页面中手动运行 `Build and release`。构建时产生的版本号只写入安装包，不会反向修改仓库，因此不会造成自动提交循环。
+
 ## 推荐测试
 
 安装后依次验证：
@@ -71,7 +83,6 @@ aidoku package .
 
 ### 已知待完善
 
-- 登录/Cookie 支持
 - 更准确的“连载中 / 已完结”识别
 - 分类/标签
 - 作品详情页简介的精确 selector

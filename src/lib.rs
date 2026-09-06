@@ -69,14 +69,76 @@ impl Wenku8 {
         defaults_set(&format!("{storage_key}.values"), DefaultValue::Null);
     }
 
+    fn is_selected_site_url(&self, url: &str) -> bool {
+        let site = self.selected_site();
+        let origin = format!("https://{site}");
+        let www_origin = format!("https://www.{site}");
+
+        [origin, www_origin].iter().any(|origin| {
+            let origin = origin.as_str();
+            url == origin
+                || url
+                    .strip_prefix(origin)
+                    .map(|rest| rest.starts_with('/'))
+                    .unwrap_or(false)
+        })
+    }
+
+    fn resolve_url(&self, href: &str, base_url: &str) -> Option<String> {
+        let href = href.trim();
+        if href.is_empty()
+            || href.starts_with('#')
+            || href.starts_with("javascript:")
+            || href.starts_with("data:")
+        {
+            return None;
+        }
+        if href.starts_with("https://") || href.starts_with("http://") {
+            return Some(href.to_string());
+        }
+        if href.starts_with("//") {
+            return Some(format!("https:{href}"));
+        }
+        if href.starts_with('/') {
+            return Some(format!("{}{href}", self.base_url()));
+        }
+
+        let base_without_fragment = base_url.split('#').next().unwrap_or(base_url);
+        let base_without_query = base_without_fragment
+            .split('?')
+            .next()
+            .unwrap_or(base_without_fragment);
+        let directory = if let Some(authority_start) = base_without_query.find("://") {
+            let path_start = authority_start + 3;
+            if base_without_query[path_start..].contains('/') {
+                base_without_query
+                    .rsplit_once('/')
+                    .map(|(directory, _)| directory)
+                    .unwrap_or(base_without_query)
+            } else {
+                base_without_query
+            }
+        } else {
+            base_without_query
+                .rsplit_once('/')
+                .map(|(directory, _)| directory)
+                .unwrap_or(base_without_query)
+        };
+        Some(format!("{directory}/{href}"))
+    }
+
     fn request_html(&self, url: &str) -> Result<Document> {
         let mut request = Request::get(url)?
             .header("User-Agent", USER_AGENT)
             .header("Referer", &self.base_url())
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5");
 
-        if let Some(cookie) = self.cookie_header() {
-            request = request.header("Cookie", &cookie);
+        // Cookie 必须只发送给它所属的 HTTPS 站点。章节 URL 会持久化，
+        // 用户切换域名后可能仍打开旧域名章节，不能把新站点会话带过去。
+        if self.is_selected_site_url(url) {
+            if let Some(cookie) = self.cookie_header() {
+                request = request.header("Cookie", &cookie);
+            }
         }
 
         let response = request.send()?;
@@ -121,7 +183,8 @@ impl Wenku8 {
             status if status >= 500 => {
                 bail!("Wenku8 服务器暂时不可用（HTTP {status}），请稍后重试");
             }
-            _ => Ok(()),
+            status if (200..300).contains(&status) => Ok(()),
+            status => bail!("Wenku8 请求失败（HTTP {status}）"),
         }
     }
 
@@ -242,8 +305,8 @@ impl Wenku8 {
             {
                 if text.len() > 20 {
                     let cleaned = text
-                        .replace("内容简介", "")
                         .replace("内容简介：", "")
+                        .replace("内容简介", "")
                         .trim()
                         .to_string();
                     if !cleaned.is_empty() {
@@ -285,11 +348,7 @@ impl Wenku8 {
                 entries.push(Manga {
                     key,
                     title,
-                    url: Some(if url.starts_with("http") {
-                        url
-                    } else {
-                        format!("{}{url}", self.base_url())
-                    }),
+                    url: self.resolve_url(&url, &self.base_url()),
                     ..Default::default()
                 });
             }
@@ -355,9 +414,18 @@ impl Source for Wenku8 {
         let html = self.request_html(&url)?;
         let entries = self.parse_search_results(&html);
 
-        // Wenku8 搜索页通常每页有固定数量结果。
-        // 当前无法从外部环境稳定访问站点验证分页控件，所以这里用“本页非空”作为保守判断。
-        let has_next_page = !entries.is_empty();
+        // 只有页面确实链接到下一页时才继续，避免最后一页重复加载。
+        let next_page_marker = format!("page={}", page.saturating_add(1));
+        let has_next_page = html
+            .select("a[href]")
+            .map(|mut links| {
+                links.any(|link| {
+                    link.attr("href")
+                        .map(|href| href.contains(&next_page_marker))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
 
         Ok(MangaPageResult {
             entries,
@@ -409,7 +477,8 @@ impl Source for Wenku8 {
         }
 
         if needs_chapters {
-            let html = self.request_html(&self.reader_url(&manga.key))?;
+            let reader_url = self.reader_url(&manga.key);
+            let html = self.request_html(&reader_url)?;
             let mut chapters: Vec<Chapter> = Vec::new();
 
             if let Some(links) = html.select("td.ccss a[href], .ccss a[href]") {
@@ -418,10 +487,8 @@ impl Source for Wenku8 {
                         continue;
                     };
 
-                    let url = if href.starts_with("http://") || href.starts_with("https://") {
-                        href
-                    } else {
-                        format!("{}/{href}", self.base_url())
+                    let Some(url) = self.resolve_url(&href, &reader_url) else {
+                        continue;
                     };
 
                     let title = link
