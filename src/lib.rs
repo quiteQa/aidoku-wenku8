@@ -465,26 +465,61 @@ impl Wenku8 {
         })
     }
 
-    fn chapter_text(&self, chapter: &Chapter) -> Result<String> {
+    fn format_novel_text(text: &str) -> String {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut paragraphs = Vec::new();
+        for line in normalized.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            // PageContent::Text 使用 Markdown；小说中的符号应按原文显示。
+            let mut paragraph = String::from("　　");
+            for ch in line.chars() {
+                if "\\`*_{}[]<>#!|~".contains(ch) { paragraph.push('\\'); }
+                paragraph.push(ch);
+            }
+            paragraphs.push(paragraph);
+        }
+        paragraphs.join("\n\n")
+    }
+
+    fn chapter_pages(&self, chapter: &Chapter) -> Result<Vec<Page>> {
         let url = chapter.url.clone().unwrap_or_else(|| chapter.key.clone());
 
         let html = self.request_html(&url)?;
 
         for selector in ["#acontent", "#content", "div#content"] {
             if let Some(container) = html.select_first(selector) {
-                // text() 在 Aidoku/SwiftSoup 中会处理 HTML 实体；
-                // 对小说正文比直接保留 HTML 更适合 Text Reader。
-                if let Some(text) = container.text() {
-                    let text = text
-                        .replace("\r\n", "\n")
-                        .replace('\r', "\n")
-                        .trim()
-                        .to_string();
-
-                    if !text.is_empty() {
-                        return Ok(text);
+                if let Some(unwanted) = container.select("#contentdp, script, style, iframe, noscript") {
+                    unwanted.remove();
+                }
+                let mut images: Vec<String> = Vec::new();
+                if let Some(elements) = container.select("img") {
+                    for img in elements {
+                        let src = img.attr("src").filter(|src| !src.trim().is_empty())
+                            .or_else(|| img.attr("data-src"));
+                        if let Some(src) = src.and_then(|src| self.resolve_url(&src, &url)) {
+                            if (src.starts_with("https://") || src.starts_with("http://"))
+                                && !images.contains(&src) { images.push(src); }
+                        }
                     }
                 }
+                // SwiftSoup 的 text() 会压缩空白。先保留 HTML 的换行边界，
+                // 再使用 untrimmed_text 解实体，避免把整章合并为一段。
+                let markup = container.html().unwrap_or_default()
+                    .replace("<br />", "\n").replace("<br>", "\n").replace("<br/>", "\n")
+                    .replace("</p>", "\n").replace("</div>", "\n");
+                let formatted = Html::parse_fragment(markup.as_bytes())?
+                    .select_first("body").and_then(|body| body.untrimmed_text())
+                    .map(|text| Self::format_novel_text(&text)).unwrap_or_default();
+                let mut pages = Vec::new();
+                if !formatted.is_empty() {
+                    pages.push(Page { content: PageContent::text(formatted), ..Default::default() });
+                }
+                // 与参考项目相同，插图单独展示；纯插图章节也能正常打开。
+                for image in images {
+                    pages.push(Page { content: PageContent::url(image), ..Default::default() });
+                }
+                if !pages.is_empty() { return Ok(pages); }
             }
         }
 
@@ -666,12 +701,7 @@ impl Source for Wenku8 {
     }
 
     fn get_page_list(&self, _manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
-        let text = self.chapter_text(&chapter)?;
-
-        Ok(vec![Page {
-            content: PageContent::text(text),
-            ..Default::default()
-        }])
+        self.chapter_pages(&chapter)
     }
 }
 
