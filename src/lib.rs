@@ -59,7 +59,11 @@ impl Wenku8 {
     }
 
     fn cookie_header(&self) -> Option<String> {
-        let cookies = defaults_get_map(&self.auth_cookie_storage_key())?;
+        // 登录窗口会在每次 Cookie 更新时保存此记录；优先使用它，
+        // 避免回调维护的第二份快照与界面上的登录状态不同步。
+        let login_key = if self.selected_site() == "wenku8.cc" { LOGIN_CC_KEY } else { LOGIN_NET_KEY };
+        let cookies = defaults_get_map(login_key)
+            .or_else(|| defaults_get_map(&self.auth_cookie_storage_key()))?;
         let mut header = String::new();
 
         for (name, value) in cookies {
@@ -182,8 +186,11 @@ impl Wenku8 {
             Err(_) => GBK.decode(&data).0.into_owned(),
         };
         let html = Html::parse_with_url(decoded.as_bytes(), url)?;
-        if html.select_first("form[name='frmlogin'], form[action*='login.php'] input[type='password']").is_some() {
-            bail!("Wenku8 返回登录页：请在插件设置中重新登录。若登录浏览器从 .cc 跳转到了 .net，请选择 .net 并登录该站点");
+        // 普通页面的侧栏也可包含登录表单。只有主内容中的登录表单
+        // 才表明请求被重定向到登录页，不能扫描整个文档或匹配提示文字。
+        if html.select_first("#content form[name='frmlogin'] input[type='password'], #content form[action*='login.php'] input[type='password']").is_some() {
+            let site = self.selected_site();
+            bail!("Wenku8 未接受本次请求的登录会话（{site}）。设置中的已登录标记不代表会话仍有效；请打开对应登录入口确认网页账号状态");
         }
         let body_text = html
             .select_first("body")
@@ -206,11 +213,6 @@ impl Wenku8 {
             bail!(
                 "Wenku8 触发了 Cloudflare 安全验证：请在浏览器中确认站点可访问，或更换网络后重试"
             );
-        }
-        if html.select_first("form[name='frmlogin']").is_some()
-            || body_text.contains("用户名或邮箱")
-        {
-            bail!("Wenku8 登录已失效：请在插件设置中重新登录当前站点");
         }
         Ok(html)
     }
