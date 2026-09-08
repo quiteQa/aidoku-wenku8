@@ -70,7 +70,9 @@ impl Wenku8 {
             let name = name.trim();
             let value = value.trim();
             // 验证 Cookie 由 Aidoku 的浏览器和网络会话管理，不能重放旧快照。
-            if !name.starts_with("jieqi") {
+            // 不按 jieqi 前缀筛选：PHPSESSID 等站点会话 Cookie 也可能
+            // 是服务器验证登录必需的。仅排除客户端管理的 CF 验证快照。
+            if name == "cf_clearance" || name.starts_with("__cf") || name.starts_with("_cf") {
                 continue;
             }
             if name.is_empty() || value.is_empty() {
