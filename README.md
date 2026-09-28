@@ -47,7 +47,27 @@ PageContent::text(...)
 
 Wenku8 当前会对部分服务器/IP 返回 403，并且部分页面可能要求登录。
 
-参考 `hikari_novel_flutter` 的处理方式，本源会区分 Cloudflare 人机验证与普通 403，并提示关闭代理或切换网络。书源无法在后台绕过 Cloudflare 验证；如果浏览器可以访问而 Aidoku 请求仍被拒绝，这是 Cloudflare 对原生网络客户端与浏览器采用不同识别策略所致。
+本源会区分明确的 Cloudflare 验证页、普通 403、登录页和搜索限流。浏览器可以访问而 Aidoku 请求失败，并不能单凭这个现象认定是 CF 指纹问题，也可能是 Cookie 同步、域名跳转或站点限制。书源无法在后台绕过 Cloudflare 验证；请在 Aidoku 图源内打开对应站点完成验证，外部浏览器的通过状态不代表插件会话已经同步。
+
+### 网络策略优化
+
+参考 [LightNovelReader-For-IOS](https://github.com/komorebiiluvu/LightNovelReader-For-IOS) 的会话与限流处理，保留 Aidoku 默认 UA 和原有网页登录方式，不引入共享账号、密码保存或自动登录。
+
+- 搜索与翻页共用 6 秒冷却时间（从上次请求结束计算，`.net` / `.cc` 共用），过快操作会提示剩余秒数，不阻塞线程；普通列表、封面及正文不受此额外冷却影响。
+- 冷却时间保存在图源偏好中，是客户端尽力保护，不是跨并发请求的原子队列；服务器仍可能对账号/IP 单独限流。
+- 检查最终跳转地址是否为 `login.php`，并使用最终地址解析相对链接。
+- 优先识别 `cf-mitigated: challenge`；HTML 检查使用特定标题/元素，不再把正文出现“cloudflare”当作验证失败。
+- 识别站点的搜索间隔提示，不把限流误报为无内容或要求重新登录。不自动重试 403、登录页和 CF 挑战。
+- 保留现有按站点保存的 Cookie；此修改不保证解决 Aidoku 客户端与 WebView 的 Cookie 同步问题，也不把本地登录标记视为服务端会话验证。
+
+网络策略回归测试可独立运行，不需要 Aidoku 运行时：
+
+```bash
+rustc --edition=2021 --test src/network_policy.rs -o network-tests
+./network-tests
+```
+
+`build.sh` 与自动发布工作流也会在打包前运行这些测试。测试覆盖冷却边界、时钟回拨、搜索/登录 URL 和验证页误判；仍需真机验证 Cookie 与 CF 流程。
 
 本项目**不会绕过登录、验证码或反爬机制**。当 Wenku8 要求登录时，请在 Aidoku 中打开此源的设置，选择“登录 Wenku8”，并在官方页面内自行完成登录。源只使用该网页登录产生的 Cookie 来请求受限页面，**不会读取、保存或提交你的账号密码**。
 

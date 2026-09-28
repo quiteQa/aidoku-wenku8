@@ -1,6 +1,7 @@
 #![no_std]
 
 mod categories;
+mod network_policy;
 
 use aidoku::{
     alloc::{format, string::ToString, vec, String, Vec},
@@ -8,6 +9,7 @@ use aidoku::{
         defaults::{defaults_get, defaults_get_map, defaults_set, DefaultValue},
         html::{Document, Html},
         net::{set_rate_limit, Request, Response, TimeUnit},
+        std::current_date,
     },
     prelude::*,
     Chapter, ContentRating, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
@@ -22,6 +24,7 @@ const LOGIN_CC_KEY: &str = "wenku8_login_cc";
 const AUTH_COOKIE_STORAGE_PREFIX: &str = "wenku8_auth_cookies_";
 const LOGIN_COOKIE_NAME: &str = "jieqiUserInfo";
 const REQUEST_TIMEOUT_SECONDS: f64 = 20.0;
+const LAST_SEARCH_KEY: &str = "wenku8_last_search_at";
 
 struct Wenku8;
 
@@ -163,6 +166,7 @@ impl Wenku8 {
     fn send_html(&self, request: Request, url: &str) -> Result<Document> {
         let mut request = request
             .header("Referer", &self.base_url())
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5")
             .timeout(REQUEST_TIMEOUT_SECONDS);
 
@@ -174,8 +178,30 @@ impl Wenku8 {
             }
         }
 
-        let response = request.send()?;
+        // Independent of the global image/list rate limit. Fail fast rather than
+        // blocking the host thread or replaying a login/CF failure automatically.
+        let is_search = network_policy::is_search_url(url);
+        if is_search {
+            let now = current_date();
+            let last = defaults_get::<String>(LAST_SEARCH_KEY)
+                .and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
+            let wait = network_policy::search_wait(now, last);
+            if wait > 0 {
+                bail!("Wenku8 搜索冷却中，请在 {wait} 秒后重试（不影响书目和正文）");
+            }
+            defaults_set(LAST_SEARCH_KEY, DefaultValue::String(now.to_string()));
+        }
+        let result = request.send();
+        if is_search {
+            // Also cover slow responses and transport failures.
+            defaults_set(LAST_SEARCH_KEY, DefaultValue::String(current_date().to_string()));
+        }
+        let response = result?;
         self.validate_response_status(&response)?;
+        let final_url = response.get_url().unwrap_or_else(|| url.to_string());
+        if network_policy::is_login_url(&final_url) {
+            bail!("Wenku8 请求被跳转到登录页。请在图源内确认最终域名与所选站点一致；若网页已登录而列表仍失败，可能是会话未同步，反复登录不一定有效");
+        }
 
         // Wenku8 返回 GBK 字节。不要依赖客户端将旧编码识别为 UTF-8，
         // 否则可能得到空 DOM；与参考客户端一样，在解析前明确解码。
@@ -187,7 +213,7 @@ impl Wenku8 {
             Ok(text) => text.to_string(),
             Err(_) => GBK.decode(&data).0.into_owned(),
         };
-        let html = Html::parse_with_url(decoded.as_bytes(), url)?;
+        let html = Html::parse_with_url(decoded.as_bytes(), &final_url)?;
         // 普通页面的侧栏也可包含登录表单。只有主内容中的登录表单
         // 才表明请求被重定向到登录页，不能扫描整个文档或匹配提示文字。
         if html.select_first("#content form[name='frmlogin'] input[type='password'], #content form[action*='login.php'] input[type='password']").is_some() {
@@ -206,33 +232,33 @@ impl Wenku8 {
         {
             bail!("Wenku8 站点已关闭：当前域名返回了站点关闭页面");
         }
-        if page_text.contains("just a moment")
-            || page_text.contains("checking your browser")
-            || page_text.contains("sorry, you have been blocked")
-            || page_text.contains("请完成安全验证")
-            || page_text.contains("cloudflare")
+        let title = Self::first_text(&html, &["title"]).unwrap_or_default();
+        if network_policy::is_challenge_title(&title)
+            || html.select_first("form#challenge-form, #cf-challenge-running, #cf-error-details").is_some()
         {
             bail!(
-                "Wenku8 触发了 Cloudflare 安全验证：请在浏览器中确认站点可访问，或更换网络后重试"
+                "Wenku8 返回安全验证页面：请在 Aidoku 图源内打开当前站点完成验证；外部浏览器通过不代表插件会话已同步"
             );
+        }
+        if is_search {
+            let message = Self::first_text(&html, &["#content"]).unwrap_or_default();
+            if network_policy::is_search_throttled(&message) {
+                bail!("Wenku8 提示搜索过于频繁，请等待至少 6 秒后重试；无需重新登录");
+            }
         }
         Ok(html)
     }
 
     fn validate_response_status(&self, response: &Response) -> Result<()> {
         let status = response.status_code();
+        // Cloudflare's explicit challenge header takes precedence at any status.
+        if response.get_header("cf-mitigated")
+            .map(|value| network_policy::is_challenge_header(&value)).unwrap_or(false) {
+            bail!("Wenku8 触发了 Cloudflare 人机验证：请在 Aidoku 图源内打开当前站点完成验证，再返回重试");
+        }
         if status == 403 {
-            let is_challenge = response
-                .get_header("cf-mitigated")
-                .map(|value| value.to_ascii_lowercase().contains("challenge"))
-                .unwrap_or(false);
-            if is_challenge {
-                bail!(
-                    "Wenku8 触发了 Cloudflare 人机验证：请先用浏览器访问当前站点，或切换网络后重试"
-                );
-            }
             bail!(
-                "Wenku8 返回 HTTP 403：当前 IP 或客户端被拒绝，请关闭代理或切换 Wi-Fi/蜂窝网络后重试"
+                "Wenku8 返回 HTTP 403：站点拒绝了请求，未收到明确的 CF 挑战标记。可能与站点安全策略或会话有关，请勿连续重试"
             );
         }
 
