@@ -478,14 +478,12 @@ impl Wenku8 {
         entries
     }
 
-    fn parse_single_search_result(&self, html: &Document) -> Option<Manga> {
-        // 唯一匹配会直接跳到详情页；不要把详情页推荐栏误当搜索结果。
-        let link = html.select_first("#content a[href*='addbookcase.php?bid=']")?;
-        let href = link.attr("href")?;
-        let key = href.split("bid=").nth(1)?.chars()
-            .take_while(|c| c.is_ascii_digit()).collect::<String>();
-        if key.is_empty() { return None; }
-        let title = Self::first_text(html, &["#content table b", "#content h1"])?;
+    fn parse_single_search_result(&self, html: &Document, is_search: bool) -> Option<Manga> {
+        // 列表页同样有加入书架链接，不能据此认定是单书详情页。
+        // send_html 已将响应最终 URL 作为 DOM base URI。
+        let final_url = html.select_first("html")?.base_uri()?;
+        let key = network_policy::single_search_book_key(is_search, &final_url)?.to_string();
+        let title = Self::first_text(html, &["#content h1", "#content table b"])?;
         Some(Manga {
             cover: Some(Self::cover_url(&key)),
             url: Some(self.book_url(&key)),
@@ -572,7 +570,9 @@ impl Source for Wenku8 {
         filters: Vec<FilterValue>,
     ) -> Result<MangaPageResult> {
         let page = page.max(1);
-        let html = if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
+        let query = query.filter(|q| !q.trim().is_empty());
+        let is_search = query.is_some();
+        let html = if let Some(query) = query {
             let encoded = Self::encode_search_query(query.trim());
             if page == 1 {
                 // 与登录后实际网页表单一致：GBK 表单 POST 到 so.php。
@@ -595,7 +595,7 @@ impl Source for Wenku8 {
             self.request_html(&url)?
         };
 
-        if let Some(manga) = self.parse_single_search_result(&html) {
+        if let Some(manga) = self.parse_single_search_result(&html, is_search) {
             return Ok(MangaPageResult { entries: vec![manga], has_next_page: false });
         }
         let entries = self.parse_search_results(&html);

@@ -26,6 +26,19 @@ pub fn is_login_url(url: &str) -> bool {
     url_path(url) == "/login.php"
 }
 
+/// Only a real detail URL may use the single-search-result shortcut.
+/// List pages also contain add-to-bookshelf links, so those are not evidence.
+pub fn single_search_book_key(is_search: bool, url: &str) -> Option<&str> {
+    if !is_search {
+        return None;
+    }
+    let key = url_path(url).strip_prefix("/book/")?.strip_suffix(".htm")?;
+    if key.is_empty() || !key.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(key)
+}
+
 pub fn is_challenge_header(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case("challenge")
 }
@@ -90,5 +103,33 @@ mod tests {
         assert!(is_search_throttled("两次搜索间隔时间不得少于 5 秒"));
         assert!(is_search_throttled("間隔時間不得少於"));
         assert!(!is_search_throttled("没有搜索结果"));
+    }
+
+    #[test]
+    fn categories_never_use_single_book_shortcut() {
+        for url in [
+            "https://www.wenku8.net/modules/article/articlelist.php?page=1",
+            "https://www.wenku8.net/modules/article/toplist.php?sort=allvisit",
+            "https://www.wenku8.net/modules/article/tags.php?t=test",
+            "https://www.wenku8.net/book/123.htm",
+        ] {
+            assert_eq!(single_search_book_key(false, url), None);
+        }
+    }
+
+    #[test]
+    fn only_search_redirect_to_numeric_detail_is_single_book() {
+        assert_eq!(single_search_book_key(true, "https://www.wenku8.net/book/123.htm"), Some("123"));
+        assert_eq!(single_search_book_key(true, "https://www.wenku8.cc/book/123.htm?from=search"), Some("123"));
+        for url in [
+            "https://www.wenku8.net/modules/article/search.php?searchkey=test",
+            "https://www.wenku8.net/modules/article/articlelist.php?page=1",
+            "https://www.wenku8.net/so.php?next=/book/123.htm",
+            "https://www.wenku8.net/book/.htm",
+            "https://www.wenku8.net/book/not-a-book.htm",
+            "https://www.wenku8.net/book/123/4.htm",
+        ] {
+            assert_eq!(single_search_book_key(true, url), None);
+        }
     }
 }
