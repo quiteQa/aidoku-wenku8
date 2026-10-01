@@ -13,7 +13,7 @@ use aidoku::{
     },
     prelude::*,
     Chapter, ContentRating, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
-    ImageRequestProvider, Listing, ListingProvider, PageContent, Result, Source, Viewer, WebLoginHandler,
+    ImageRequestProvider, Listing, ListingProvider, NotificationHandler, PageContent, Result, Source, Viewer, WebLoginHandler,
 };
 use encoding_rs::GBK;
 
@@ -25,10 +25,22 @@ const AUTH_COOKIE_STORAGE_PREFIX: &str = "wenku8_auth_cookies_";
 const LOGIN_COOKIE_NAME: &str = "jieqiUserInfo";
 const REQUEST_TIMEOUT_SECONDS: f64 = 20.0;
 const LAST_SEARCH_KEY: &str = "wenku8_last_search_at";
+const DOWNLOAD_LIMIT_ENABLED_KEY: &str = "wenku8_download_limit_enabled";
+const DOWNLOAD_REQUEST_LIMIT_KEY: &str = "wenku8_download_requests_per_second";
+const DOWNLOAD_LIMIT_NOTIFICATION: &str = "wenku8_download_limit_changed";
 
 struct Wenku8;
 
 impl Wenku8 {
+    fn apply_download_limit(&self) {
+        let enabled = defaults_get::<bool>(DOWNLOAD_LIMIT_ENABLED_KEY);
+        let value = defaults_get::<String>(DOWNLOAD_REQUEST_LIMIT_KEY);
+        let permits = network_policy::download_request_permits(enabled, value.as_deref());
+        // Aidoku owns the queue. Reapplying the configuration does not reset
+        // its current request count; zero permits removes the rate limit.
+        set_rate_limit(permits, 1, TimeUnit::Seconds);
+    }
+
     fn category_url(&self, category: &str, page: i32) -> Result<String> {
         let (_, path) = categories::CATEGORIES.iter()
             .find(|(id, _)| *id == category)
@@ -164,6 +176,7 @@ impl Wenku8 {
     }
 
     fn send_html(&self, request: Request, url: &str) -> Result<Document> {
+        self.apply_download_limit();
         let mut request = request
             .header("Referer", &self.base_url())
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -559,8 +572,9 @@ impl Source for Wenku8 {
     fn new() -> Self {
         // 由 Aidoku 在网络层统一排队，比在每个入口手动 sleep 更可靠；
         // 既抑制首页、搜索和详情同时刷新产生的突发请求，也不会阻塞解析逻辑。
-        set_rate_limit(4, 1, TimeUnit::Seconds);
-        Self
+        let source = Self;
+        source.apply_download_limit();
+        source
     }
 
     fn get_search_manga_list(
@@ -741,6 +755,7 @@ impl ImageRequestProvider for Wenku8 {
         url: String,
         _context: Option<aidoku::PageContext>,
     ) -> Result<Request> {
+        self.apply_download_limit();
         // 不覆盖 User-Agent，让 Aidoku 使用与其 WebView 一致的默认标识。
         Ok(Request::get(&url)?
             .header("Referer", &self.base_url())
@@ -784,4 +799,12 @@ impl ListingProvider for Wenku8 {
     }
 }
 
-register_source!(Wenku8, WebLoginHandler, ImageRequestProvider, ListingProvider);
+impl NotificationHandler for Wenku8 {
+    fn handle_notification(&self, notification: String) {
+        if notification == DOWNLOAD_LIMIT_NOTIFICATION {
+            self.apply_download_limit();
+        }
+    }
+}
+
+register_source!(Wenku8, WebLoginHandler, ImageRequestProvider, ListingProvider, NotificationHandler);

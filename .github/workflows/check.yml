@@ -1,0 +1,41 @@
+name: Check source
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-aidoku-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install Aidoku CLI
+        run: |
+          if ! command -v aidoku >/dev/null 2>&1; then
+            cargo install --git https://github.com/Aidoku/aidoku-rs \
+              --rev e1320b0a2e11afb59e4dee374883a2212d325699 \
+              --locked aidoku-cli
+          fi
+
+      - name: Test, build, package and verify
+        run: sh build.sh

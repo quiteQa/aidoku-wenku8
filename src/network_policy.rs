@@ -2,6 +2,21 @@
 
 pub const SEARCH_COOLDOWN_SECONDS: i64 = 6;
 
+pub const DEFAULT_DOWNLOAD_REQUESTS_PER_SECOND: i32 = 5;
+pub const MAX_DOWNLOAD_REQUESTS_PER_SECOND: i32 = 10;
+
+/// Zero permits disables Aidoku's source-wide rate limiter.
+/// This is a request frequency limit, not a limit on in-flight downloads.
+pub fn download_request_permits(enabled: Option<bool>, value: Option<&str>) -> i32 {
+    if enabled == Some(false) {
+        return 0;
+    }
+    value
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|value| (1..=MAX_DOWNLOAD_REQUESTS_PER_SECOND).contains(value))
+        .unwrap_or(DEFAULT_DOWNLOAD_REQUESTS_PER_SECOND)
+}
+
 pub fn search_wait(now: i64, last: i64) -> i64 {
     // A clock correction or stale preference must not lock search indefinitely.
     if last <= 0 || last > now {
@@ -58,6 +73,28 @@ pub fn is_search_throttled(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_limit_defaults_and_valid_values() {
+        assert_eq!(download_request_permits(None, None), 5);
+        assert_eq!(download_request_permits(Some(true), Some("1")), 1);
+        assert_eq!(download_request_permits(Some(true), Some("5")), 5);
+        assert_eq!(download_request_permits(Some(true), Some("10")), 10);
+    }
+
+    #[test]
+    fn invalid_download_limit_uses_default() {
+        for value in ["0", "-1", "11", "999999999999", "", "invalid", "2.5"] {
+            assert_eq!(download_request_permits(Some(true), Some(value)), 5);
+        }
+    }
+
+    #[test]
+    fn disabling_download_limit_clears_permits() {
+        for value in [None, Some("5"), Some("invalid")] {
+            assert_eq!(download_request_permits(Some(false), value), 0);
+        }
+    }
 
     #[test]
     fn cooldown_boundaries() {
