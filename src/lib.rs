@@ -755,7 +755,6 @@ impl ImageRequestProvider for Wenku8 {
         url: String,
         _context: Option<aidoku::PageContext>,
     ) -> Result<Request> {
-        self.apply_download_limit();
         // 不覆盖 User-Agent，让 Aidoku 使用与其 WebView 一致的默认标识。
         Ok(Request::get(&url)?
             .header("Referer", &self.base_url())
