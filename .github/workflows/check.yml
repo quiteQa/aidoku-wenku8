@@ -37,5 +37,33 @@ jobs:
               --locked aidoku-cli
           fi
 
+      - name: Set installable preview version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest_version=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.body' | sed -n 's/.*Aidoku source version: \([0-9][0-9]*\).*/\1/p')
+          test -n "$latest_version"
+          preview_version=$((latest_version + 1))
+          jq --argjson version "$preview_version" '.info.version = $version' res/source.json > res/source.json.tmp
+          mv res/source.json.tmp res/source.json
+
       - name: Test, build, package and verify
         run: sh build.sh
+
+      - name: Generate checksum and build information
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          sha256sum package.aix > SHA256SUMS
+          printf 'Source commit: %s\n' "$SOURCE_COMMIT" > BUILD_INFO.txt
+          jq -r '"Aidoku source version: \(.info.version)"' res/source.json >> BUILD_INFO.txt
+
+      - name: Upload installable source
+        uses: actions/upload-artifact@v4
+        with:
+          name: wenku8-download-limit-${{ github.run_number }}
+          path: |
+            package.aix
+            SHA256SUMS
+            BUILD_INFO.txt
+          if-no-files-found: error
