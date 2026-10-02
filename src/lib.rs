@@ -819,8 +819,9 @@ impl ImageRequestProvider for Wenku8 {
         let mut request = Request::get(&url)?
             .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
             .timeout(REQUEST_TIMEOUT_SECONDS);
-        if network_policy::is_wenku8_image_url(&url) {
-            request = request.header("Referer", &self.base_url());
+        let base_url = self.base_url();
+        if let Some(referer) = network_policy::image_referer(&url, &base_url) {
+            request = request.header("Referer", referer);
         }
         Ok(request)
     }

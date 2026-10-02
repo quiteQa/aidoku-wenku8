@@ -27,15 +27,19 @@ pub fn should_retry_chapter(status: i32, challenge: bool, login_redirect: bool, 
     status == 429 && !challenge && !login_redirect && retries < MAX_CHAPTER_RATE_LIMIT_RETRIES
 }
 
-/// Foreign image hosts must not inherit Wenku8's Referer.
-pub fn is_wenku8_image_url(url: &str) -> bool {
-    let Some((scheme, rest)) = url.split_once("://") else { return false; };
+fn url_host(url: &str) -> Option<&str> {
+    let (scheme, rest) = url.split_once("://")?;
     if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
-        return false;
+        return None;
     }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.contains('@') { return false; }
-    let host = authority.split(':').next().unwrap_or("");
+    if authority.contains('@') { return None; }
+    Some(authority.split(':').next().unwrap_or(""))
+}
+
+/// Foreign image hosts must not inherit Wenku8's Referer.
+pub fn is_wenku8_image_url(url: &str) -> bool {
+    let Some(host) = url_host(url) else { return false; };
     ["wenku8.net", "wenku8.cc", "wenku8.com"].iter().any(|domain| {
         host.eq_ignore_ascii_case(domain)
             || host.len() > domain.len()
@@ -43,6 +47,31 @@ pub fn is_wenku8_image_url(url: &str) -> bool {
                 && host.get(host.len() - domain.len()..)
                     .map(|suffix| suffix.eq_ignore_ascii_case(domain)).unwrap_or(false)
     })
+}
+
+pub fn is_tencent_doc_image_url(url: &str) -> bool {
+    let Some(host) = url_host(url) else { return false; };
+    let suffix = ".docs.qq.com";
+    if host.len() <= suffix.len() { return false; }
+    let prefix_length = host.len() - suffix.len();
+    if !host.get(prefix_length..).map(|value| value.eq_ignore_ascii_case(suffix)).unwrap_or(false) {
+        return false;
+    }
+    let Some(prefix) = host.get(..prefix_length) else { return false; };
+    if !prefix.get(..6).map(|value| value.eq_ignore_ascii_case("docimg")).unwrap_or(false) {
+        return false;
+    }
+    prefix.get(6..).map(|number| !number.is_empty() && number.bytes().all(|c| c.is_ascii_digit())).unwrap_or(false)
+}
+
+pub fn image_referer<'a>(url: &str, wenku8_base_url: &'a str) -> Option<&'a str> {
+    if is_tencent_doc_image_url(url) {
+        Some("https://docs.qq.com/")
+    } else if is_wenku8_image_url(url) {
+        Some(wenku8_base_url)
+    } else {
+        None
+    }
 }
 
 /// Zero permits disables Aidoku's source-wide rate limiter.
@@ -113,6 +142,31 @@ pub fn is_search_throttled(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tencent_document_images_use_the_image_hosts_referer() {
+        for url in [
+            "https://docimg10.docs.qq.com/image/a.png",
+            "https://docimg9.docs.qq.com/image/a.jpeg",
+            "https://DOCIMG2.DOCS.QQ.COM/image/a.png",
+        ] {
+            assert_eq!(image_referer(url, "https://www.wenku8.net"), Some("https://docs.qq.com/"));
+        }
+    }
+
+    #[test]
+    fn image_referer_does_not_leak_to_unrelated_hosts() {
+        for url in [
+            "https://docimg10.docs.qq.com.evil.test/image/a.png",
+            "https://docimg10.docs.qq.com@evil.test/image/a.png",
+            "https://example.com/image/a.png?next=docimg10.docs.qq.com",
+            "https://docimgfake.docs.qq.com/image/a.png",
+            "https://docimg10.evil.test/image/a.png",
+        ] {
+            assert_eq!(image_referer(url, "https://www.wenku8.net"), None);
+        }
+        assert_eq!(image_referer("https://img.wenku8.com/image/a.jpg", "https://www.wenku8.cc"), Some("https://www.wenku8.cc"));
+    }
 
     #[test]
     fn respects_retry_after_seconds_and_http_dates() {
