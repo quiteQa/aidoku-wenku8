@@ -49,7 +49,8 @@ jobs:
         id: version
         shell: bash
         run: |
-          source_version=$((4 + GITHUB_RUN_NUMBER))
+          base_version=$(jq '.info.version' res/source.json)
+          source_version=$((base_version + GITHUB_RUN_NUMBER))
           release_tag="v0.1.0-build.${GITHUB_RUN_NUMBER}"
           jq --argjson version "$source_version" \
             '.info.version = $version' res/source.json > res/source.json.tmp

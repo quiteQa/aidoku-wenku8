@@ -44,6 +44,10 @@ jobs:
           latest_version=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.body' | sed -n 's/.*Aidoku source version: \([0-9][0-9]*\).*/\1/p')
           test -n "$latest_version"
           preview_version=$((latest_version + 1))
+          declared_version=$(jq '.info.version' res/source.json)
+          if [ "$declared_version" -gt "$preview_version" ]; then
+            preview_version=$declared_version
+          fi
           jq --argjson version "$preview_version" '.info.version = $version' res/source.json > res/source.json.tmp
           mv res/source.json.tmp res/source.json
 

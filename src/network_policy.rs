@@ -4,6 +4,46 @@ pub const SEARCH_COOLDOWN_SECONDS: i64 = 6;
 
 pub const DEFAULT_DOWNLOAD_REQUESTS_PER_SECOND: i32 = 5;
 pub const MAX_DOWNLOAD_REQUESTS_PER_SECOND: i32 = 10;
+pub const MAX_CHAPTER_RATE_LIMIT_RETRIES: u32 = 2;
+pub const MAX_AUTOMATIC_COOLDOWN_SECONDS: i64 = 30;
+pub const DEFAULT_RETRY_AFTER_SECONDS: i64 = 10;
+
+/// Accept Retry-After's seconds form or an HTTP-date parsed by the host.
+/// Keep a one-second margin because the host clock returns whole seconds.
+pub fn retry_after_seconds(now: i64, header: Option<&str>, http_date: Option<i64>) -> i64 {
+    let seconds = header
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| i64::try_from(value).unwrap_or(i64::MAX))
+        .or_else(|| http_date.map(|date| date.saturating_sub(now).max(0)))
+        .unwrap_or(DEFAULT_RETRY_AFTER_SECONDS);
+    seconds.saturating_add(1)
+}
+
+pub fn server_cooldown_wait(now: i64, until: i64) -> i64 {
+    until.saturating_sub(now).max(0)
+}
+
+pub fn should_retry_chapter(status: i32, challenge: bool, login_redirect: bool, retries: u32) -> bool {
+    status == 429 && !challenge && !login_redirect && retries < MAX_CHAPTER_RATE_LIMIT_RETRIES
+}
+
+/// Foreign image hosts must not inherit Wenku8's Referer.
+pub fn is_wenku8_image_url(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else { return false; };
+    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') { return false; }
+    let host = authority.split(':').next().unwrap_or("");
+    ["wenku8.net", "wenku8.cc", "wenku8.com"].iter().any(|domain| {
+        host.eq_ignore_ascii_case(domain)
+            || host.len() > domain.len()
+                && host.as_bytes()[host.len() - domain.len() - 1] == b'.'
+                && host.get(host.len() - domain.len()..)
+                    .map(|suffix| suffix.eq_ignore_ascii_case(domain)).unwrap_or(false)
+    })
+}
 
 /// Zero permits disables Aidoku's source-wide rate limiter.
 /// This is a request frequency limit, not a limit on in-flight downloads.
@@ -73,6 +113,56 @@ pub fn is_search_throttled(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn respects_retry_after_seconds_and_http_dates() {
+        assert_eq!(retry_after_seconds(100, Some(" 10 "), None), 11);
+        assert_eq!(retry_after_seconds(100, Some("0"), None), 1);
+        assert_eq!(retry_after_seconds(100, Some("HTTP date"), Some(120)), 21);
+        assert_eq!(retry_after_seconds(100, Some("HTTP date"), Some(99)), 1);
+        assert_eq!(retry_after_seconds(100, None, None), 11);
+        assert_eq!(retry_after_seconds(100, Some("invalid"), None), 11);
+        assert_eq!(retry_after_seconds(100, Some("-1"), None), 11);
+        assert_eq!(retry_after_seconds(100, Some("18446744073709551615"), None), i64::MAX);
+    }
+
+    #[test]
+    fn server_cooldown_expires_without_early_requests() {
+        assert_eq!(server_cooldown_wait(100, 111), 11);
+        assert_eq!(server_cooldown_wait(110, 111), 1);
+        assert_eq!(server_cooldown_wait(111, 111), 0);
+        assert_eq!(server_cooldown_wait(112, 111), 0);
+        assert_eq!(server_cooldown_wait(100, 0), 0);
+    }
+
+    #[test]
+    fn retries_only_rate_limits_with_a_finite_budget() {
+        assert!(should_retry_chapter(429, false, false, 0));
+        assert!(should_retry_chapter(429, false, false, 1));
+        assert!(!should_retry_chapter(429, false, false, 2));
+        assert!(!should_retry_chapter(429, true, false, 0));
+        assert!(!should_retry_chapter(429, false, true, 0));
+        for status in [200, 401, 403, 404, 500, 503] {
+            assert!(!should_retry_chapter(status, false, false, 0));
+        }
+    }
+
+    #[test]
+    fn only_wenku8_images_receive_the_site_referer() {
+        for url in ["https://img.wenku8.com/image/1.jpg", "https://www.wenku8.net/a.png", "https://WENKU8.CC/a.jpg"] {
+            assert!(is_wenku8_image_url(url), "{url}");
+        }
+        for url in [
+            "https://docimg10.docs.qq.com/image/a.png",
+            "https://example.com/image.jpg?origin=wenku8.net",
+            "https://wenku8.net.example.com/a.png",
+            "https://fakewenku8.net/a.png",
+            "https://wenku8.net@evil.test/a.png",
+            "data:image/png;base64,abc",
+        ] {
+            assert!(!is_wenku8_image_url(url), "{url}");
+        }
+    }
 
     #[test]
     fn download_limit_defaults_and_valid_values() {
