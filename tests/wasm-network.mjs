@@ -43,12 +43,15 @@ async function host(initial = {}, respond = () => ({ body })) {
     return -5;
   };
   const imports = {
-    env: { print: (p, n) => logs.push(read(p, n)), abort: () => { throw Error('WASM aborted'); } },
+    env: {
+      print: (p, n) => logs.push(read(p, n)),
+      abort: () => { throw Error('WASM aborted'); },
+      sleep: seconds => { assert.ok(seconds > 0 && seconds <= 30); sleeps.push(seconds); now += seconds; },
+    },
     std: {
       destroy: id => objects.delete(id), current_date: () => now,
       buffer_len: id => objects.get(id)?.length ?? -1,
       read_buffer: (id, p) => copy(p, objects.get(id)),
-      sleep: seconds => { assert.ok(seconds > 0 && seconds <= 30); sleeps.push(seconds); now += seconds; },
       parse_date: (p, n) => { const value = Date.parse(read(p, n)); return Number.isNaN(value) ? -1 : value / 1000; },
     },
     defaults: {
