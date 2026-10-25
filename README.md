@@ -10,6 +10,30 @@ PageContent::text(...)
 
 因此章节会进入 Aidoku 的 **Text Reader**，不是旧式“文字渲染成图片”。
 
+## 添加源订阅
+
+在 Aidoku 的“设置 → 源列表”中添加以下地址，再前往“浏览 → 添加源”安装 Wenku8：
+
+```text
+https://raw.githubusercontent.com/quiteQa/aidoku-wenku8/gh-pages/index.min.json
+```
+
+[点此添加订阅](aidoku://addSourceList?url=https%3A%2F%2Fraw.githubusercontent.com%2FquiteQa%2Faidoku-wenku8%2Fgh-pages%2Findex.min.json)。如果浏览器不支持该链接，请手动复制上面的地址。
+
+订阅沿用源 ID `zh.wenku8`，已手动安装的同源会按版本检查更新。登录及限速设置仍在源设置中配置，订阅不包含账号信息。
+
+订阅发布到独立的 `gh-pages` 分支，不需要开启 GitHub Pages。首版使用已通过完整构建验证的 v26；PR 中新增正式发布成功后更新订阅的流程，合并到 `main` 后自动生效。PR 仅生成可检查的订阅构建产物。
+
+本地生成及核对订阅：
+
+```sh
+./build.sh
+aidoku build package.aix --output public --name 'Wenku8 小说源'
+python3 scripts/verify_subscription.py package.aix public
+```
+
+`index.json`、`index.min.json`、带版本号的安装包和图标均由官方 CLI 生成。发布时保留旧版本文件，保证客户端缓存的旧索引仍能找到对应安装包。
+
 ## 已实现
 
 - 使用 Wenku8 所需的 GBK 编码搜索轻小说
@@ -30,6 +54,7 @@ PageContent::text(...)
 - 两个站点分别保存 Cookie，切换站点后需要登录对应站点
 - 在 Aidoku 设置页注销并清除该源的 WebView Cookie
 - 数据请求与登录入口统一使用 Wenku8 的 `www` 主机
+- 下载限速开关与每秒请求数设置（默认开启，默认 5）
 
 ## 分类使用
 
@@ -58,6 +83,8 @@ Wenku8 当前会对部分服务器/IP 返回 403，并且部分页面可能要�
 - 检查最终跳转地址是否为 `login.php`，并使用最终地址解析相对链接。
 - 优先识别 `cf-mitigated: challenge`；HTML 检查使用特定标题/元素，不再把正文出现“cloudflare”当作验证失败。
 - 识别站点的搜索间隔提示，不把限流误报为无内容或要求重新登录。不自动重试 403、登录页和 CF 挑战。
+- 收到 HTTP 429 后保存服务端冷却截止时间；后续正文和书目请求等待冷却结束，避免连续请求导致整批章节失败。章节 GET 在冷却后最多重试 2 次，搜索 POST 不自动重试。支持 `Retry-After` 秒数或 HTTP 日期，缺失时默认等待 10 秒，并增加 1 秒余量；超过 30 秒的单次等待会提示暂停下载，不提前请求。
+- Wenku8 图片使用当前 Wenku8 站点的 Referer；`docimg数字.docs.qq.com` 的腾讯文档插图使用 `https://docs.qq.com/`，其他第三方图片不附带 Referer。已在网站登录后核对《败犬女主太多了！》受影响章节，并确认日志中的 8 张插图加上腾讯文档 Referer 后返回有效图片。不带 Referer 或携带 Wenku8 Referer 时会返回 403。此处理不保证解决其他图床或已失效链接的问题。
 - 保留现有按站点保存的 Cookie；此修改不保证解决 Aidoku 客户端与 WebView 的 Cookie 同步问题，也不把本地登录标记视为服务端会话验证。
 
 网络策略回归测试可独立运行，不需要 Aidoku 运行时：
@@ -67,7 +94,18 @@ rustc --edition=2021 --test src/network_policy.rs -o network-tests
 ./network-tests
 ```
 
-`build.sh` 会在打包前运行这些测试并检查依赖锁文件。当前 GitHub 自动发布流程仍使用原有打包校验步骤，回归测试需在发布前本地运行。测试覆盖冷却边界、时钟回拨、搜索/登录 URL 和验证页误判；仍需真机验证 Cookie 与 CF 流程。
+`build.sh` 会在打包前运行这些测试并检查依赖锁文件。Pull Request 的 `Check source` 工作流也会运行该脚本。测试覆盖下载限速默认值、异常设置与关闭行为，服务端冷却和有限重试、图片 Referer 域名匹配，以及搜索冷却边界、时钟回拨、搜索/登录 URL 和验证页误判；仍需真机验证 429 等待、第三方插图、设置切换、Cookie 与 CF 流程。
+
+### 下载限速设置
+
+在此源的设置中打开“下载限制”：
+
+- **开启下载限速**：默认开启；关闭后移除原来固定每秒 4 次的额外请求限速。
+- **每秒请求数**：默认 **5**，可选 **1–10**；关闭限速时此选项不可修改，已选数值仍会保留。
+
+设置改变时通知网络层更新限额，后续正文请求也会重新读取设置。限额由 Aidoku 网络层统一排队，正文、目录、列表和详情共用，不额外丢弃下载任务。客户端原生下载的插图和封面走独立通道，不受书源的 `set_rate_limit` 控制。关闭此限速不会关闭站点自身的限制或独立的搜索冷却。
+
+这里控制的是**每秒发起的请求数**。Aidoku 当前书源 API 不提供动态并发数接口：`config.maximumParallelRequests` 是固定资源配置，真正的下载队列由客户端管理。此设置不能保证同时运行的下载数为 5，也不能消除服务端按账号/IP 设置的限制。若需要可调的同时下载数，需要配套修改 Aidoku 客户端。
 
 本项目**不会绕过登录、验证码或反爬机制**。当 Wenku8 要求登录时，请在 Aidoku 中打开此源的设置，选择“登录 Wenku8”，并在官方页面内自行完成登录。源只使用该网页登录产生的 Cookie 来请求受限页面，**不会读取、保存或提交你的账号密码**。
 
@@ -79,7 +117,7 @@ rustc --edition=2021 --test src/network_policy.rs -o network-tests
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install --git https://github.com/Aidoku/aidoku-rs aidoku-cli
+cargo install --git https://github.com/Aidoku/aidoku-rs --rev e1320b0a2e11afb59e4dee374883a2212d325699 --locked aidoku-cli
 ```
 
 在本目录运行以下命令生成可安装的 `package.aix`：
@@ -130,3 +168,21 @@ aidoku package .
 - 更可靠的分页判断
 
 如果测试后把 Aidoku 的报错文字或页面截图发回来，就可以继续针对实际页面把 selector 修到稳定版。
+
+## v25：参考其他 Aidoku 源的优化
+
+参考 [aidoku-pixiv](https://github.com/quiteQa/aidoku-pixiv) 的 ID／链接直达和 WASM 宿主测试方式，以及 [Community FreeWebNovel](https://github.com/Aidoku-Community/sources/tree/main/sources/en.freewebnovel) 的 DeepLinkHandler 接口使用。
+
+- 搜索框输入正整数小说 ID（例如 `3057`）或 Wenku8 小说／目录／章节链接，直接请求详情页，不占用六秒搜索冷却。直达结果不再分页。
+- 实现小说与章节深链接。只识别 `wenku8.net`、`wenku8.cc` 及其 www 主机；拒绝伪装域名和歧义 ID 参数。
+- 切换站点后，已保存的有效章节链接在请求前转换到当前站点，使用当前站点的登录会话。目录无需因切换域名而重新加入书库；实际登录权限由当前站点决定。无法识别的旧章节链接会提示刷新目录。
+- 封面目录按小说 ID 除以 1000 计算，兼容万位及更长的 ID。
+- Cookie 请求头仅保留格式有效的站点 Cookie，Cloudflare 验证 Cookie 仍由 Aidoku 管理；不把登录 Cookie 发送到图片域名。
+
+运行 `sh build.sh` 需要 Node.js 22+，会先执行 Rust 策略／URL 测试，构建 release WASM，再运行 `node tests/wasm-network.mjs`，最后打包及执行 Aidoku 校验。PR 校验与正式发布共用这一入口，发布前也必须通过测试。
+
+WASM 测试覆盖限速设置、腾讯图片 Referer、429 重试次数和等待、HTTP 日期、持久冷却、搜索 POST 不重放、403／登录跳转／CF 挑战、切换站点会话、ID 直达、深链接和登录回调。HTTP、时钟、设置及 HTML 宿主均为模拟；HTML 仅提供测试所需的固定 DOM，不能代替 SwiftSoup 解析或 Aidoku 真机验收。测试不使用真实账号，也不会访问网站。
+
+## v26：按官方文档和 SDK 核对
+
+接口依据与实现对应见 [Aidoku SDK 对照文档](docs/AIDOKU_SDK.md)。SDK 与 CLI 固定到同一提交，多域名只使用 `info.urls`，显式声明客户端最大并发为 5。GBK 搜索表单改用 SDK URI 工具编码；补充 trait 导出、宿主导入、SDK／CLI 一致性以及客户端 `aidoku://` 深链接转换的回归检查。编辑器资源提示使用该固定 SDK 的官方 JSON Schema。

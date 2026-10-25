@@ -2,18 +2,20 @@
 
 mod categories;
 mod network_policy;
+mod urls;
 
 use aidoku::{
     alloc::{format, string::ToString, vec, String, Vec},
+    helpers::uri::encode_uri_component,
     imports::{
         defaults::{defaults_get, defaults_get_map, defaults_set, DefaultValue},
         html::{Document, Html},
         net::{set_rate_limit, Request, Response, TimeUnit},
-        std::current_date,
+        std::{current_date, parse_date_with_options, print, sleep},
     },
     prelude::*,
-    Chapter, ContentRating, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
-    ImageRequestProvider, Listing, ListingProvider, PageContent, Result, Source, Viewer, WebLoginHandler,
+    Chapter, ContentRating, DeepLinkHandler, DeepLinkResult, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
+    ImageRequestProvider, Listing, ListingProvider, NotificationHandler, PageContent, Result, Source, Viewer, WebLoginHandler,
 };
 use encoding_rs::GBK;
 
@@ -25,10 +27,23 @@ const AUTH_COOKIE_STORAGE_PREFIX: &str = "wenku8_auth_cookies_";
 const LOGIN_COOKIE_NAME: &str = "jieqiUserInfo";
 const REQUEST_TIMEOUT_SECONDS: f64 = 20.0;
 const LAST_SEARCH_KEY: &str = "wenku8_last_search_at";
+const SERVER_COOLDOWN_KEY: &str = "wenku8_server_cooldown_until";
+const DOWNLOAD_LIMIT_ENABLED_KEY: &str = "wenku8_download_limit_enabled";
+const DOWNLOAD_REQUEST_LIMIT_KEY: &str = "wenku8_download_requests_per_second";
+const DOWNLOAD_LIMIT_NOTIFICATION: &str = "wenku8_download_limit_changed";
 
 struct Wenku8;
 
 impl Wenku8 {
+    fn apply_download_limit(&self) {
+        let enabled = defaults_get::<bool>(DOWNLOAD_LIMIT_ENABLED_KEY);
+        let value = defaults_get::<String>(DOWNLOAD_REQUEST_LIMIT_KEY);
+        let permits = network_policy::download_request_permits(enabled, value.as_deref());
+        // Aidoku owns the queue. Reapplying the configuration does not reset
+        // its current request count; zero permits removes the rate limit.
+        set_rate_limit(permits, 1, TimeUnit::Seconds);
+    }
+
     fn category_url(&self, category: &str, page: i32) -> Result<String> {
         let (_, path) = categories::CATEGORIES.iter()
             .find(|(id, _)| *id == category)
@@ -75,10 +90,7 @@ impl Wenku8 {
             // 验证 Cookie 由 Aidoku 的浏览器和网络会话管理，不能重放旧快照。
             // 不按 jieqi 前缀筛选：PHPSESSID 等站点会话 Cookie 也可能
             // 是服务器验证登录必需的。仅排除客户端管理的 CF 验证快照。
-            if name == "cf_clearance" || name.starts_with("__cf") || name.starts_with("_cf") {
-                continue;
-            }
-            if name.is_empty() || value.is_empty() {
+            if !network_policy::is_replayable_cookie(name, value) {
                 continue;
             }
             if !header.is_empty() {
@@ -160,10 +172,10 @@ impl Wenku8 {
     }
 
     fn request_html(&self, url: &str) -> Result<Document> {
-        self.send_html(Request::get(url)?, url)
+        self.send_html(Request::get(url)?, url, false)
     }
 
-    fn send_html(&self, request: Request, url: &str) -> Result<Document> {
+    fn prepare_html_request(&self, request: Request, url: &str) -> Request {
         let mut request = request
             .header("Referer", &self.base_url())
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -177,9 +189,46 @@ impl Wenku8 {
                 request = request.header("Cookie", &cookie);
             }
         }
+        request
+    }
 
-        // Independent of the global image/list rate limit. Fail fast rather than
-        // blocking the host thread or replaying a login/CF failure automatically.
+    fn wait_for_server_cooldown(&self) -> Result<()> {
+        let started = current_date();
+        loop {
+            let now = current_date();
+            let until = defaults_get::<String>(SERVER_COOLDOWN_KEY)
+                .and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
+            let wait = network_policy::server_cooldown_wait(now, until);
+            if wait == 0 { return Ok(()); }
+            // Do not issue an early request or leave one call sleeping indefinitely.
+            if wait > network_policy::MAX_AUTOMATIC_COOLDOWN_SECONDS
+                || now.saturating_sub(started).saturating_add(wait)
+                    > network_policy::MAX_AUTOMATIC_COOLDOWN_SECONDS {
+                bail!("Wenku8 服务端冷却中，请暂停下载，在 {wait} 秒后重试");
+            }
+            print(format!("Wenku8 服务端冷却：等待 {wait} 秒后继续请求"));
+            sleep(wait as i32);
+        }
+    }
+
+    fn remember_server_cooldown(&self, response: &Response) {
+        let now = current_date();
+        let header = response.get_header("Retry-After");
+        let http_date = header.as_deref().and_then(|value| parse_date_with_options(
+            value.trim(), "EEE, dd MMM yyyy HH:mm:ss zzz", "en_US_POSIX", "UTC",
+        ));
+        let delay = network_policy::retry_after_seconds(now, header.as_deref(), http_date);
+        let existing = defaults_get::<String>(SERVER_COOLDOWN_KEY)
+            .and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
+        let until = now.saturating_add(delay).max(existing);
+        defaults_set(SERVER_COOLDOWN_KEY, DefaultValue::String(until.to_string()));
+    }
+
+    fn send_html(&self, request: Request, url: &str, retry_chapter: bool) -> Result<Document> {
+        self.apply_download_limit();
+        let mut request = self.prepare_html_request(request, url);
+
+        // Search remains fail-fast and is never automatically replayed.
         let is_search = network_policy::is_search_url(url);
         if is_search {
             let now = current_date();
@@ -191,12 +240,35 @@ impl Wenku8 {
             }
             defaults_set(LAST_SEARCH_KEY, DefaultValue::String(now.to_string()));
         }
-        let result = request.send();
-        if is_search {
-            // Also cover slow responses and transport failures.
-            defaults_set(LAST_SEARCH_KEY, DefaultValue::String(current_date().to_string()));
-        }
-        let response = result?;
+        let mut retries = 0;
+        let response = loop {
+            // Cooldown applies even when the optional request rate limit is off.
+            self.wait_for_server_cooldown()?;
+            let result = request.send();
+            if is_search {
+                defaults_set(LAST_SEARCH_KEY, DefaultValue::String(current_date().to_string()));
+            }
+            let response = result?;
+            let challenge = response.get_header("cf-mitigated")
+                .map(|value| network_policy::is_challenge_header(&value)).unwrap_or(false);
+            let login_redirect = response.get_url()
+                .map(|value| network_policy::is_login_url(&value)).unwrap_or(false);
+            if response.status_code() == 429 && !challenge && !login_redirect {
+                self.remember_server_cooldown(&response);
+            }
+            if retry_chapter && network_policy::should_retry_chapter(
+                response.status_code(), challenge, login_redirect, retries,
+            ) {
+                retries += 1;
+                print(format!("Wenku8 章节触发 429，将在服务端冷却后重试（{retries}/{}）", network_policy::MAX_CHAPTER_RATE_LIMIT_RETRIES));
+                // Only chapter GETs opt into retries. Rebuild headers and cookies;
+                // Response::into_request would discard them and any POST body.
+                drop(response);
+                request = self.prepare_html_request(Request::get(url)?, url);
+                continue;
+            }
+            break response;
+        };
         self.validate_response_status(&response)?;
         let final_url = response.get_url().unwrap_or_else(|| url.to_string());
         if network_policy::is_login_url(&final_url) {
@@ -263,7 +335,7 @@ impl Wenku8 {
         }
 
         match status {
-            401 => bail!("Wenku8 返回 HTTP 401：登录会话无效，请重新登录"),
+            401 => { bail!("Wenku8 返回 HTTP 401：登录会话无效，请重新登录"); }
             429 => {
                 if let Some(retry_after) = response.get_header("Retry-After")
                     .and_then(|value| value.trim().parse::<u64>().ok()) {
@@ -277,16 +349,12 @@ impl Wenku8 {
                 bail!("Wenku8 服务器暂时不可用（HTTP {status}），请稍后重试");
             }
             status if (200..300).contains(&status) => Ok(()),
-            status => bail!("Wenku8 请求失败（HTTP {status}）"),
+            status => { bail!("Wenku8 请求失败（HTTP {status}）"); }
         }
     }
 
     fn book_url(&self, key: &str) -> String {
-        if key.starts_with("http://") || key.starts_with("https://") {
-            key.to_string()
-        } else {
-            format!("{}/book/{key}.htm", self.base_url())
-        }
+        format!("{}/book/{key}.htm", self.base_url())
     }
 
     fn reader_url(&self, key: &str) -> String {
@@ -295,57 +363,15 @@ impl Wenku8 {
     }
 
     fn cover_url(key: &str) -> String {
-        let directory = if key.len() <= 3 {
-            "0"
-        } else {
-            key.get(0..1).unwrap_or("0")
-        };
+        let directory = urls::cover_directory(key);
         format!("https://img.wenku8.com/image/{directory}/{key}/{key}s.jpg")
     }
 
     fn encode_search_query(query: &str) -> String {
         // Wenku8 的简体搜索表单使用 GBK，而不是 UTF-8。
-        // 按字节全部百分号编码，与站点表单及 hikari_novel_flutter 保持一致。
-        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        // SDK 接受原始字节；先转为 GBK，再进行 URI component 编码。
         let (encoded, _, _) = GBK.encode(query);
-        let mut result = String::with_capacity(encoded.len() * 3);
-        for byte in encoded.iter().copied() {
-            result.push('%');
-            result.push(HEX[(byte >> 4) as usize] as char);
-            result.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-        result
-    }
-
-    fn extract_book_key(url: &str) -> Option<String> {
-        // 兼容：
-        // /book/1234.htm
-        // https://www.wenku8.net/book/1234.htm
-        if let Some(pos) = url.find("/book/") {
-            let tail = &url[pos + 6..];
-            let key = tail.split('.').next()?.split('/').next()?;
-            if !key.is_empty() {
-                return Some(key.to_string());
-            }
-        }
-
-        // 兼容 articleinfo.php?id=1234 / reader.php?aid=1234
-        for marker in ["?id=", "&id=", "?aid=", "&aid="] {
-            if let Some(pos) = url.find(marker) {
-                let tail = &url[pos + marker.len()..];
-                let key = tail
-                    .split('&')
-                    .next()
-                    .unwrap_or(tail)
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>();
-                if !key.is_empty() {
-                    return Some(key);
-                }
-            }
-        }
-        None
+        encode_uri_component(encoded.as_ref())
     }
 
     fn first_text(html: &Document, selectors: &[&str]) -> Option<String> {
@@ -445,7 +471,10 @@ impl Wenku8 {
                     .or_else(|| link.attr("href")) else {
                     continue;
                 };
-                let Some(key) = Self::extract_book_key(&url) else {
+                let Some(url) = self.resolve_url(&url, &self.base_url()) else {
+                    continue;
+                };
+                let Some(key) = urls::book_id(&url).map(ToString::to_string) else {
                     continue;
                 };
                 if seen.iter().any(|v| v == &key) {
@@ -511,9 +540,11 @@ impl Wenku8 {
     }
 
     fn chapter_pages(&self, chapter: &Chapter) -> Result<Vec<Page>> {
-        let url = chapter.url.clone().unwrap_or_else(|| chapter.key.clone());
+        let saved_url = chapter.url.as_deref().unwrap_or(&chapter.key);
+        let url = urls::chapter_url(saved_url, &self.base_url())
+            .ok_or_else(|| error!("无效的 Wenku8 章节链接，请刷新小说目录后重试"))?;
 
-        let html = self.request_html(&url)?;
+        let html = self.send_html(Request::get(&url)?, &url, true)?;
 
         for selector in ["#acontent", "#content", "div#content"] {
             if let Some(container) = html.select_first(selector) {
@@ -559,8 +590,9 @@ impl Source for Wenku8 {
     fn new() -> Self {
         // 由 Aidoku 在网络层统一排队，比在每个入口手动 sleep 更可靠；
         // 既抑制首页、搜索和详情同时刷新产生的突发请求，也不会阻塞解析逻辑。
-        set_rate_limit(4, 1, TimeUnit::Seconds);
-        Self
+        let source = Self;
+        source.apply_download_limit();
+        source
     }
 
     fn get_search_manga_list(
@@ -571,6 +603,17 @@ impl Source for Wenku8 {
     ) -> Result<MangaPageResult> {
         let page = page.max(1);
         let query = query.filter(|q| !q.trim().is_empty());
+        // ID/link lookup uses the detail page, without consuming a search request.
+        if let Some(key) = query.as_deref().and_then(urls::book_id) {
+            if page > 1 {
+                return Ok(MangaPageResult::default());
+            }
+            let manga = self.get_manga_update(Manga {
+                key: key.to_string(),
+                ..Default::default()
+            }, true, false)?;
+            return Ok(MangaPageResult { entries: vec![manga], has_next_page: false });
+        }
         let is_search = query.is_some();
         let html = if let Some(query) = query {
             let encoded = Self::encode_search_query(query.trim());
@@ -580,7 +623,7 @@ impl Source for Wenku8 {
                 let body = format!("searchtype=articlename&searchkey={encoded}&charset=&Submit=%C7%E1%D0%A1%CB%B5%CB%D1%CB%F7");
                 self.send_html(Request::post(&url)?
                     .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(body.as_bytes()), &url)?
+                    .body(body.as_bytes()), &url, false)?
             } else {
                 // 翻页沿用搜索结果页提供的 GET 参数，不添加额外 charset 参数。
                 let url = format!("{}/modules/article/search.php?searchtype=articlename&searchkey={encoded}&page={page}", self.base_url());
@@ -643,6 +686,9 @@ impl Source for Wenku8 {
         needs_details: bool,
         needs_chapters: bool,
     ) -> Result<Manga> {
+        manga.key = urls::book_id(&manga.key)
+            .ok_or_else(|| error!("无效的 Wenku8 小说 ID，请从书源重新打开这本小说"))?
+            .to_string();
         let book_url = self.book_url(&manga.key);
 
         if needs_details {
@@ -742,10 +788,14 @@ impl ImageRequestProvider for Wenku8 {
         _context: Option<aidoku::PageContext>,
     ) -> Result<Request> {
         // 不覆盖 User-Agent，让 Aidoku 使用与其 WebView 一致的默认标识。
-        Ok(Request::get(&url)?
-            .header("Referer", &self.base_url())
+        let mut request = Request::get(&url)?
             .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
-            .timeout(REQUEST_TIMEOUT_SECONDS))
+            .timeout(REQUEST_TIMEOUT_SECONDS);
+        let base_url = self.base_url();
+        if let Some(referer) = network_policy::image_referer(&url, &base_url) {
+            request = request.header("Referer", referer);
+        }
+        Ok(request)
     }
 }
 
@@ -754,7 +804,7 @@ impl WebLoginHandler for Wenku8 {
         let storage_key = match key.as_str() {
             LOGIN_NET_KEY => format!("{AUTH_COOKIE_STORAGE_PREFIX}wenku8.net"),
             LOGIN_CC_KEY => format!("{AUTH_COOKIE_STORAGE_PREFIX}wenku8.cc"),
-            _ => bail!("不支持的登录设置：{key}"),
+            _ => { bail!("不支持的登录设置：{key}"); }
         };
 
         let has_user_cookie = cookies
@@ -784,4 +834,23 @@ impl ListingProvider for Wenku8 {
     }
 }
 
-register_source!(Wenku8, WebLoginHandler, ImageRequestProvider, ListingProvider);
+impl NotificationHandler for Wenku8 {
+    fn handle_notification(&self, notification: String) {
+        if notification == DOWNLOAD_LIMIT_NOTIFICATION {
+            self.apply_download_limit();
+        }
+    }
+}
+
+impl DeepLinkHandler for Wenku8 {
+    fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>> {
+        if let Some(book) = urls::chapter_book_id(&url) {
+            if let Some(key) = urls::chapter_url(&url, &self.base_url()) {
+                return Ok(Some(DeepLinkResult::Chapter { manga_key: book.to_string(), key }));
+            }
+        }
+        Ok(urls::book_id(&url).map(|key| DeepLinkResult::Manga { key: key.to_string() }))
+    }
+}
+
+register_source!(Wenku8, WebLoginHandler, ImageRequestProvider, ListingProvider, NotificationHandler, DeepLinkHandler);

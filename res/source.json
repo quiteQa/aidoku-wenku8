@@ -1,5 +1,5 @@
 {
-  "config": { "hidesFiltersWhileSearching": true },
+  "config": { "hidesFiltersWhileSearching": true, "maximumParallelRequests": 5 },
   "listings": [
   { "id": "heat", "name": "热度排名" },
   {
@@ -122,8 +122,13 @@
   "info": {
     "id": "zh.wenku8",
     "name": "轻小说文库 Wenku8",
-    "version": 4,
-    "url": "https://www.wenku8.net",
+    "version": 26,
+    "urls": [
+      "https://www.wenku8.net",
+      "https://www.wenku8.cc",
+      "https://wenku8.net",
+      "https://wenku8.cc"
+    ],
     "minAppVersion": "0.8.3",
     "contentRating": 0,
     "languages": [
