@@ -93,7 +93,7 @@ rustc --edition=2021 --test src/network_policy.rs -o network-tests
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install --git https://github.com/Aidoku/aidoku-rs aidoku-cli
+cargo install --git https://github.com/Aidoku/aidoku-rs --rev e1320b0a2e11afb59e4dee374883a2212d325699 --locked aidoku-cli
 ```
 
 在本目录运行以下命令生成可安装的 `package.aix`：
@@ -158,3 +158,7 @@ aidoku package .
 运行 `sh build.sh` 需要 Node.js 22+，会先执行 Rust 策略／URL 测试，构建 release WASM，再运行 `node tests/wasm-network.mjs`，最后打包及执行 Aidoku 校验。PR 校验与正式发布共用这一入口，发布前也必须通过测试。
 
 WASM 测试覆盖限速设置、腾讯图片 Referer、429 重试次数和等待、HTTP 日期、持久冷却、搜索 POST 不重放、403／登录跳转／CF 挑战、切换站点会话、ID 直达、深链接和登录回调。HTTP、时钟、设置及 HTML 宿主均为模拟；HTML 仅提供测试所需的固定 DOM，不能代替 SwiftSoup 解析或 Aidoku 真机验收。测试不使用真实账号，也不会访问网站。
+
+## v26：按官方文档和 SDK 核对
+
+接口依据与实现对应见 [Aidoku SDK 对照文档](docs/AIDOKU_SDK.md)。SDK 与 CLI 固定到同一提交，多域名只使用 `info.urls`，显式声明客户端最大并发为 5。GBK 搜索表单改用 SDK URI 工具编码；补充 trait 导出、宿主导入、SDK／CLI 一致性以及客户端 `aidoku://` 深链接转换的回归检查。编辑器资源提示使用该固定 SDK 的官方 JSON Schema。

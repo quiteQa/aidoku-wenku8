@@ -123,6 +123,28 @@ const auth = site => ({ wenku8_site: site, ['wenku8_login_' + (site.endsWith('cc
 let passed = 0;
 async function test(name, run) { await run(); passed++; console.log('PASS ' + name); }
 
+await test('registered source features export the SDK entry points and host imports', async () => {
+  const exported = new Set(WebAssembly.Module.exports(wasm).map(item => item.name));
+  for (const name of ['start', 'free_result', 'get_search_manga_list', 'get_manga_update', 'get_page_list', 'get_manga_list', 'get_image_request', 'handle_web_login', 'handle_notification', 'handle_deep_link']) {
+    assert.ok(exported.has(name), 'Missing SDK export: ' + name);
+  }
+  const imported = new Set(WebAssembly.Module.imports(wasm).map(item => item.module + '.' + item.name));
+  for (const name of ['env.sleep', 'std.current_date', 'std.parse_date', 'net.set_rate_limit', 'defaults.get', 'defaults.set', 'html.parse']) {
+    assert.ok(imported.has(name), 'Missing host contract: ' + name);
+  }
+});
+await test('SDK and CLI builds share the exact pinned dependency revision', async () => {
+  const manifest = readFileSync(new URL('../Cargo.toml', import.meta.url), 'utf8');
+  const revision = manifest.match(/^aidoku\s*=.*\brev\s*=\s*"([a-f0-9]{40})"/m)?.[1];
+  assert.ok(revision, 'SDK revision must be explicit');
+  const lock = readFileSync(new URL('../Cargo.lock', import.meta.url), 'utf8');
+  assert.ok(lock.includes('git+https://github.com/Aidoku/aidoku-rs?rev=' + revision + '#' + revision));
+  for (const file of ['check.yml', 'release.yml']) {
+    const workflow = readFileSync(new URL('../.github/workflows/' + file, import.meta.url), 'utf8');
+    assert.ok(workflow.includes('["dependencies"]["aidoku"]["rev"]'));
+    assert.ok(workflow.includes('--rev "$sdk_revision"'));
+  }
+});
 await test('default, disabled and invalid rate settings reach the actual host API', async () => {
   const h = await host(); assert.deepEqual(h.rates.at(-1), { permits: 5, period: 1, unit: 0 });
   h.prefs.set('wenku8_download_limit_enabled', false); h.notify('wenku8_download_limit_changed'); assert.equal(h.rates.at(-1).permits, 0);
@@ -159,6 +181,14 @@ await test('search POST is never replayed after 429', async () => {
   assert.throws(() => h.search('测试'), /429/); assert.equal(h.requests.length, 1); assert.equal(h.requests[0].method, 1);
   assert.match(h.requests[0].body, /searchkey=%B2%E2%CA%D4/);
 });
+await test('SDK URI encoding preserves GBK and escapes form separators', async () => {
+  for (const [query, expected] of [['测试 &+%', '%B2%E2%CA%D4%20%26%2B%25'], ['abc &+%', 'abc%20%26%2B%25']]) {
+    const h = await host({}, () => ({ status: 429 }));
+    assert.throws(() => h.search(query), /429/);
+    const field = h.requests[0].body.split('&').find(part => part.startsWith('searchkey='));
+    assert.equal(field, 'searchkey=' + expected);
+  }
+});
 await test('403, login redirects and CF challenges never trigger automatic chapter retries', async () => {
   for (const response of [{ status: 403 }, { status: 429, headers: { 'cf-mitigated': 'challenge' } }, { url: 'https://www.wenku8.net/login.php' }]) {
     const h = await host({}, () => response); assert.throws(() => h.pages(), /403|验证|登录/); assert.equal(h.requests.length, 1); assert.deepEqual(h.sleeps, []);
@@ -184,10 +214,23 @@ await test('deep links preserve chapter identity while selecting the active site
 await test('all registered site URLs support client deep-link dispatch', async () => {
   const source = JSON.parse(readFileSync(new URL('../res/source.json', import.meta.url)));
   assert.equal(source.info.urls.length, 4);
+  assert.equal(new Set(source.info.urls).size, 4);
+  assert.equal(source.info.url, undefined, 'Multi-domain sources use urls instead of url');
+  assert.equal(source.config.maximumParallelRequests, 5);
   const h = await host();
   for (const base of source.info.urls) {
     assert.deepEqual(h.deepLink(base + '/book/3057.htm'), { book: '3057', chapter: null, listing: 0 });
   }
+  // AppDelegate.handleDeepLink matches resourceSpecifier, then restores HTTPS
+  // before invoking the source, including for aidoku:// links.
+  const dispatch = value => {
+    const specifier = value.slice(value.indexOf(':') + 1);
+    return source.info.urls.some(base => specifier.startsWith(base.slice(base.indexOf(':') + 1)))
+      ? h.deepLink('https:' + specifier) : null;
+  };
+  assert.deepEqual(dispatch('aidoku://www.wenku8.net/book/3057.htm'), { book: '3057', chapter: null, listing: 0 });
+  assert.deepEqual(dispatch('aidoku://wenku8.cc/novel/3/3057/176892.htm'), { book: '3057', chapter: 'https://www.wenku8.net/novel/3/3057/176892.htm', listing: 0 });
+  assert.equal(dispatch('aidoku://www.wenku8.net.evil.test/book/3057.htm'), null);
 });
 await test('web login persists cookies and logout clears the callback snapshot', async () => {
   const h = await host(); assert.equal(h.login('wenku8_login_net', { jieqiUserInfo: 'test_user', PHPSESSID: 'test_session' }), 1);

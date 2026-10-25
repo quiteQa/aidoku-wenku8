@@ -6,6 +6,7 @@ mod urls;
 
 use aidoku::{
     alloc::{format, string::ToString, vec, String, Vec},
+    helpers::uri::encode_uri_component,
     imports::{
         defaults::{defaults_get, defaults_get_map, defaults_set, DefaultValue},
         html::{Document, Html},
@@ -368,16 +369,9 @@ impl Wenku8 {
 
     fn encode_search_query(query: &str) -> String {
         // Wenku8 的简体搜索表单使用 GBK，而不是 UTF-8。
-        // 按字节全部百分号编码，与站点表单及 hikari_novel_flutter 保持一致。
-        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        // SDK 接受原始字节；先转为 GBK，再进行 URI component 编码。
         let (encoded, _, _) = GBK.encode(query);
-        let mut result = String::with_capacity(encoded.len() * 3);
-        for byte in encoded.iter().copied() {
-            result.push('%');
-            result.push(HEX[(byte >> 4) as usize] as char);
-            result.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-        result
+        encode_uri_component(encoded.as_ref())
     }
 
     fn first_text(html: &Document, selectors: &[&str]) -> Option<String> {

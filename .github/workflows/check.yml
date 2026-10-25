@@ -40,9 +40,10 @@ jobs:
 
       - name: Install Aidoku CLI
         run: |
+          sdk_revision=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["dependencies"]["aidoku"]["rev"])')
           if ! command -v aidoku >/dev/null 2>&1; then
             cargo install --git https://github.com/Aidoku/aidoku-rs \
-              --rev e1320b0a2e11afb59e4dee374883a2212d325699 \
+              --rev "$sdk_revision" \
               --locked aidoku-cli
           fi
 
