@@ -144,3 +144,17 @@ aidoku package .
 - 更可靠的分页判断
 
 如果测试后把 Aidoku 的报错文字或页面截图发回来，就可以继续针对实际页面把 selector 修到稳定版。
+
+## v25：参考其他 Aidoku 源的优化
+
+参考 [aidoku-pixiv](https://github.com/quiteQa/aidoku-pixiv) 的 ID／链接直达和 WASM 宿主测试方式，以及 [Community FreeWebNovel](https://github.com/Aidoku-Community/sources/tree/main/sources/en.freewebnovel) 的 DeepLinkHandler 接口使用。
+
+- 搜索框输入正整数小说 ID（例如 `3057`）或 Wenku8 小说／目录／章节链接，直接请求详情页，不占用六秒搜索冷却。直达结果不再分页。
+- 实现小说与章节深链接。只识别 `wenku8.net`、`wenku8.cc` 及其 www 主机；拒绝伪装域名和歧义 ID 参数。
+- 切换站点后，已保存的有效章节链接在请求前转换到当前站点，使用当前站点的登录会话。目录无需因切换域名而重新加入书库；实际登录权限由当前站点决定。无法识别的旧章节链接会提示刷新目录。
+- 封面目录按小说 ID 除以 1000 计算，兼容万位及更长的 ID。
+- Cookie 请求头仅保留格式有效的站点 Cookie，Cloudflare 验证 Cookie 仍由 Aidoku 管理；不把登录 Cookie 发送到图片域名。
+
+运行 `sh build.sh` 需要 Node.js 22+，会先执行 Rust 策略／URL 测试，构建 release WASM，再运行 `node tests/wasm-network.mjs`，最后打包及执行 Aidoku 校验。PR 校验与正式发布共用这一入口，发布前也必须通过测试。
+
+WASM 测试覆盖限速设置、腾讯图片 Referer、429 重试次数和等待、HTTP 日期、持久冷却、搜索 POST 不重放、403／登录跳转／CF 挑战、切换站点会话、ID 直达、深链接和登录回调。HTTP、时钟、设置及 HTML 宿主均为模拟；HTML 仅提供测试所需的固定 DOM，不能代替 SwiftSoup 解析或 Aidoku 真机验收。测试不使用真实账号，也不会访问网站。

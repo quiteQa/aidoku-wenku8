@@ -2,6 +2,7 @@
 
 mod categories;
 mod network_policy;
+mod urls;
 
 use aidoku::{
     alloc::{format, string::ToString, vec, String, Vec},
@@ -12,7 +13,7 @@ use aidoku::{
         std::{current_date, parse_date_with_options, print, sleep},
     },
     prelude::*,
-    Chapter, ContentRating, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
+    Chapter, ContentRating, DeepLinkHandler, DeepLinkResult, FilterValue, HashMap, Manga, MangaPageResult, MangaStatus, Page,
     ImageRequestProvider, Listing, ListingProvider, NotificationHandler, PageContent, Result, Source, Viewer, WebLoginHandler,
 };
 use encoding_rs::GBK;
@@ -88,10 +89,7 @@ impl Wenku8 {
             // 验证 Cookie 由 Aidoku 的浏览器和网络会话管理，不能重放旧快照。
             // 不按 jieqi 前缀筛选：PHPSESSID 等站点会话 Cookie 也可能
             // 是服务器验证登录必需的。仅排除客户端管理的 CF 验证快照。
-            if name == "cf_clearance" || name.starts_with("__cf") || name.starts_with("_cf") {
-                continue;
-            }
-            if name.is_empty() || value.is_empty() {
+            if !network_policy::is_replayable_cookie(name, value) {
                 continue;
             }
             if !header.is_empty() {
@@ -336,7 +334,7 @@ impl Wenku8 {
         }
 
         match status {
-            401 => bail!("Wenku8 返回 HTTP 401：登录会话无效，请重新登录"),
+            401 => { bail!("Wenku8 返回 HTTP 401：登录会话无效，请重新登录"); }
             429 => {
                 if let Some(retry_after) = response.get_header("Retry-After")
                     .and_then(|value| value.trim().parse::<u64>().ok()) {
@@ -350,16 +348,12 @@ impl Wenku8 {
                 bail!("Wenku8 服务器暂时不可用（HTTP {status}），请稍后重试");
             }
             status if (200..300).contains(&status) => Ok(()),
-            status => bail!("Wenku8 请求失败（HTTP {status}）"),
+            status => { bail!("Wenku8 请求失败（HTTP {status}）"); }
         }
     }
 
     fn book_url(&self, key: &str) -> String {
-        if key.starts_with("http://") || key.starts_with("https://") {
-            key.to_string()
-        } else {
-            format!("{}/book/{key}.htm", self.base_url())
-        }
+        format!("{}/book/{key}.htm", self.base_url())
     }
 
     fn reader_url(&self, key: &str) -> String {
@@ -368,11 +362,7 @@ impl Wenku8 {
     }
 
     fn cover_url(key: &str) -> String {
-        let directory = if key.len() <= 3 {
-            "0"
-        } else {
-            key.get(0..1).unwrap_or("0")
-        };
+        let directory = urls::cover_directory(key);
         format!("https://img.wenku8.com/image/{directory}/{key}/{key}s.jpg")
     }
 
@@ -388,37 +378,6 @@ impl Wenku8 {
             result.push(HEX[(byte & 0x0f) as usize] as char);
         }
         result
-    }
-
-    fn extract_book_key(url: &str) -> Option<String> {
-        // 兼容：
-        // /book/1234.htm
-        // https://www.wenku8.net/book/1234.htm
-        if let Some(pos) = url.find("/book/") {
-            let tail = &url[pos + 6..];
-            let key = tail.split('.').next()?.split('/').next()?;
-            if !key.is_empty() {
-                return Some(key.to_string());
-            }
-        }
-
-        // 兼容 articleinfo.php?id=1234 / reader.php?aid=1234
-        for marker in ["?id=", "&id=", "?aid=", "&aid="] {
-            if let Some(pos) = url.find(marker) {
-                let tail = &url[pos + marker.len()..];
-                let key = tail
-                    .split('&')
-                    .next()
-                    .unwrap_or(tail)
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>();
-                if !key.is_empty() {
-                    return Some(key);
-                }
-            }
-        }
-        None
     }
 
     fn first_text(html: &Document, selectors: &[&str]) -> Option<String> {
@@ -518,7 +477,10 @@ impl Wenku8 {
                     .or_else(|| link.attr("href")) else {
                     continue;
                 };
-                let Some(key) = Self::extract_book_key(&url) else {
+                let Some(url) = self.resolve_url(&url, &self.base_url()) else {
+                    continue;
+                };
+                let Some(key) = urls::book_id(&url).map(ToString::to_string) else {
                     continue;
                 };
                 if seen.iter().any(|v| v == &key) {
@@ -584,7 +546,9 @@ impl Wenku8 {
     }
 
     fn chapter_pages(&self, chapter: &Chapter) -> Result<Vec<Page>> {
-        let url = chapter.url.clone().unwrap_or_else(|| chapter.key.clone());
+        let saved_url = chapter.url.as_deref().unwrap_or(&chapter.key);
+        let url = urls::chapter_url(saved_url, &self.base_url())
+            .ok_or_else(|| error!("无效的 Wenku8 章节链接，请刷新小说目录后重试"))?;
 
         let html = self.send_html(Request::get(&url)?, &url, true)?;
 
@@ -645,6 +609,17 @@ impl Source for Wenku8 {
     ) -> Result<MangaPageResult> {
         let page = page.max(1);
         let query = query.filter(|q| !q.trim().is_empty());
+        // ID/link lookup uses the detail page, without consuming a search request.
+        if let Some(key) = query.as_deref().and_then(urls::book_id) {
+            if page > 1 {
+                return Ok(MangaPageResult::default());
+            }
+            let manga = self.get_manga_update(Manga {
+                key: key.to_string(),
+                ..Default::default()
+            }, true, false)?;
+            return Ok(MangaPageResult { entries: vec![manga], has_next_page: false });
+        }
         let is_search = query.is_some();
         let html = if let Some(query) = query {
             let encoded = Self::encode_search_query(query.trim());
@@ -717,6 +692,9 @@ impl Source for Wenku8 {
         needs_details: bool,
         needs_chapters: bool,
     ) -> Result<Manga> {
+        manga.key = urls::book_id(&manga.key)
+            .ok_or_else(|| error!("无效的 Wenku8 小说 ID，请从书源重新打开这本小说"))?
+            .to_string();
         let book_url = self.book_url(&manga.key);
 
         if needs_details {
@@ -832,7 +810,7 @@ impl WebLoginHandler for Wenku8 {
         let storage_key = match key.as_str() {
             LOGIN_NET_KEY => format!("{AUTH_COOKIE_STORAGE_PREFIX}wenku8.net"),
             LOGIN_CC_KEY => format!("{AUTH_COOKIE_STORAGE_PREFIX}wenku8.cc"),
-            _ => bail!("不支持的登录设置：{key}"),
+            _ => { bail!("不支持的登录设置：{key}"); }
         };
 
         let has_user_cookie = cookies
@@ -870,4 +848,15 @@ impl NotificationHandler for Wenku8 {
     }
 }
 
-register_source!(Wenku8, WebLoginHandler, ImageRequestProvider, ListingProvider, NotificationHandler);
+impl DeepLinkHandler for Wenku8 {
+    fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>> {
+        if let Some(book) = urls::chapter_book_id(&url) {
+            if let Some(key) = urls::chapter_url(&url, &self.base_url()) {
+                return Ok(Some(DeepLinkResult::Chapter { manga_key: book.to_string(), key }));
+            }
+        }
+        Ok(urls::book_id(&url).map(|key| DeepLinkResult::Manga { key: key.to_string() }))
+    }
+}
+
+register_source!(Wenku8, WebLoginHandler, ImageRequestProvider, ListingProvider, NotificationHandler, DeepLinkHandler);

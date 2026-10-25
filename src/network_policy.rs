@@ -74,6 +74,14 @@ pub fn image_referer<'a>(url: &str, wenku8_base_url: &'a str) -> Option<&'a str>
     }
 }
 
+/// Replay only valid site cookies; browser challenge cookies stay host-managed.
+pub fn is_replayable_cookie(name: &str, value: &str) -> bool {
+    name != "cf_clearance" && !name.starts_with("__cf") && !name.starts_with("_cf")
+        && !name.is_empty() && !value.is_empty()
+        && name.bytes().all(|c| c.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&c))
+        && value.bytes().all(|c| matches!(c, 0x21 | 0x23..=0x2b | 0x2d..=0x3a | 0x3c..=0x5b | 0x5d..=0x7e))
+}
+
 /// Zero permits disables Aidoku's source-wide rate limiter.
 /// This is a request frequency limit, not a limit on in-flight downloads.
 pub fn download_request_permits(enabled: Option<bool>, value: Option<&str>) -> i32 {
@@ -142,6 +150,16 @@ pub fn is_search_throttled(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_replay_retains_site_sessions_and_excludes_invalid_values() {
+        for (name, value) in [("jieqiUserInfo", "name%3Dtest"), ("PHPSESSID", "abc_123"), ("site", "a=b")] {
+            assert!(is_replayable_cookie(name, value));
+        }
+        for (name, value) in [("cf_clearance", "old"), ("__cf_bm", "old"), ("_cfuvid", "old"), ("bad;name", "value"), ("site", "a;b"), ("site", "a\r\nb"), ("site", ""), ("", "value")] {
+            assert!(!is_replayable_cookie(name, value));
+        }
+    }
 
     #[test]
     fn tencent_document_images_use_the_image_hosts_referer() {
