@@ -124,6 +124,12 @@
     "name": "轻小说文库 Wenku8",
     "version": 25,
     "url": "https://www.wenku8.net",
+    "urls": [
+      "https://www.wenku8.net",
+      "https://www.wenku8.cc",
+      "https://wenku8.net",
+      "https://wenku8.cc"
+    ],
     "minAppVersion": "0.8.3",
     "contentRating": 0,
     "languages": [

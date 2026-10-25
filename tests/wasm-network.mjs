@@ -181,6 +181,14 @@ await test('deep links preserve chapter identity while selecting the active site
   assert.deepEqual(h.deepLink('https://www.wenku8.net/book/3057.htm'), { book: '3057', chapter: null, listing: 0 });
   assert.equal(h.deepLink('https://evil.test/book/3057.htm'), null);
 });
+await test('all registered site URLs support client deep-link dispatch', async () => {
+  const source = JSON.parse(readFileSync(new URL('../res/source.json', import.meta.url)));
+  assert.equal(source.info.urls.length, 4);
+  const h = await host();
+  for (const base of source.info.urls) {
+    assert.deepEqual(h.deepLink(base + '/book/3057.htm'), { book: '3057', chapter: null, listing: 0 });
+  }
+});
 await test('web login persists cookies and logout clears the callback snapshot', async () => {
   const h = await host(); assert.equal(h.login('wenku8_login_net', { jieqiUserInfo: 'test_user', PHPSESSID: 'test_session' }), 1);
   h.pages(); assert.ok(h.requests[0].headers.cookie.includes('test_session'));
