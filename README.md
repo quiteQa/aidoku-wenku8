@@ -10,6 +10,30 @@ PageContent::text(...)
 
 因此章节会进入 Aidoku 的 **Text Reader**，不是旧式“文字渲染成图片”。
 
+## 添加源订阅
+
+在 Aidoku 的“设置 → 源列表”中添加以下地址，再前往“浏览 → 添加源”安装 Wenku8：
+
+```text
+https://raw.githubusercontent.com/quiteQa/aidoku-wenku8/gh-pages/index.min.json
+```
+
+[点此添加订阅](aidoku://addSourceList?url=https%3A%2F%2Fraw.githubusercontent.com%2FquiteQa%2Faidoku-wenku8%2Fgh-pages%2Findex.min.json)。如果浏览器不支持该链接，请手动复制上面的地址。
+
+订阅沿用源 ID `zh.wenku8`，已手动安装的同源会按版本检查更新。登录及限速设置仍在源设置中配置，订阅不包含账号信息。
+
+订阅发布到独立的 `gh-pages` 分支，不需要开启 GitHub Pages。首版使用已通过完整构建验证的 v26；PR 中新增正式发布成功后更新订阅的流程，合并到 `main` 后自动生效。PR 仅生成可检查的订阅构建产物。
+
+本地生成及核对订阅：
+
+```sh
+./build.sh
+aidoku build package.aix --output public --name 'Wenku8 小说源'
+python3 scripts/verify_subscription.py package.aix public
+```
+
+`index.json`、`index.min.json`、带版本号的安装包和图标均由官方 CLI 生成。发布时保留旧版本文件，保证客户端缓存的旧索引仍能找到对应安装包。
+
 ## 已实现
 
 - 使用 Wenku8 所需的 GBK 编码搜索轻小说

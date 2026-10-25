@@ -64,6 +64,18 @@ jobs:
       - name: Test, build, package and verify
         run: sh build.sh
 
+      - name: Build and verify subscription
+        run: |
+          aidoku build package.aix --output public --name 'Wenku8 小说源'
+          python3 scripts/verify_subscription.py package.aix public
+
+      - name: Upload subscription preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: wenku8-source-list-preview
+          path: public/
+          if-no-files-found: error
+
       - name: Generate checksum and build information
         env:
           SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
